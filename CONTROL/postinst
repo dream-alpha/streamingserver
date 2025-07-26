@@ -1,10 +1,12 @@
 #!/bin/sh
 set -e
 CHROOT_DIR=/data/ubuntu
+$CHROOT_DIR/root/mount_chroot
 chroot "$CHROOT_DIR" /bin/bash -c "
   echo '[*] Updating plugin packages...'
   /root/venv/bin/pip install -r /root/plugins/streamingserver/requirements.txt
 "
+$CHROOT_DIR/root/unmount_chroot
 echo "Plugin successfully installed."
 echo "Please restart DreamOS now!"
 exit 0

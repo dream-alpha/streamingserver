@@ -4,7 +4,7 @@
 set -euxo pipefail
 
 # Update package index
-sudo apt update
+# sudo apt update
 
 # Install required dependencies
 # sudo apt install -y \

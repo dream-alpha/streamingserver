@@ -1,88 +1,52 @@
-import struct
+import os
 import subprocess
 import json
 import tempfile
-import os
 
 
 TS_PACKET_SIZE = 188
 
 
-def append_iframes_to_ap(segment_data: bytes, ap_file_path: str, segment_offset: int, video_pid: int = 256):
+def segment_starts_with_keyframe(segment_data: bytes) -> bool:
     """
-    Scan a TS segment for I-frames and append their byte offsets to a Dreambox-style .ap file.
-    Args:
-        segment_data: The TS segment data (bytes)
-        ap_file_path: Path to the .ap file to append to
-        segment_offset: The starting byte offset of this segment in the .ts file
-        video_pid: The PID of the video stream (default 256)
+    Check if the TS segment contains a video keyframe (IDR) at or near the start.
+    Returns True if a keyframe is found in the first N packets, else False.
     """
-    print(f"[AP] append_iframes_to_ap called for {ap_file_path}, segment_offset={segment_offset}, segment_data_len={len(segment_data)}")
-    # Auto-detect most frequent video PID in 0x100–0x1FF
-    pid_counter = {}
-    for i in range(0, len(segment_data) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
-        pkt = segment_data[i : i + TS_PACKET_SIZE]
+    # MPEG-TS: Look for NAL unit type 5 (IDR) in H.264 or type 19/20 in H.265
+    # Only check first 20 packets for speed
+    max_packets = min(len(segment_data) // TS_PACKET_SIZE, 20)
+    for i in range(0, max_packets * TS_PACKET_SIZE, TS_PACKET_SIZE):
+        pkt = segment_data[i:i + TS_PACKET_SIZE]
         if len(pkt) < TS_PACKET_SIZE or pkt[0] != 0x47:
             continue
-        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-        if 0x100 <= pid <= 0x1FF:
-            pid_counter[pid] = pid_counter.get(pid, 0) + 1
-    if pid_counter:
-        video_pid_auto = max(pid_counter, key=pid_counter.get)
-        print(f"[AP] Auto-detected video PID: {video_pid_auto} (counts: {pid_counter})")
-    else:
-        video_pid_auto = video_pid
-        print(f"[AP] No video PID detected in range, using default: {video_pid}")
-
-    offsets = []
-    for i in range(0, len(segment_data) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
-        pkt = segment_data[i : i + TS_PACKET_SIZE]
-        if len(pkt) < TS_PACKET_SIZE or pkt[0] != 0x47:
-            continue
-        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-        if pid != video_pid_auto:
-            continue
-        payload_unit_start = (pkt[1] & 0x40) != 0
-        if not payload_unit_start:
-            continue
-        pes_start = pkt.find(b"\x00\x00\x01", 4)
-        if pes_start == -1:
-            continue
-        stream_id = pkt[pes_start + 3] if pes_start + 3 < len(pkt) else None
-        if stream_id != 0xE0:
-            continue
-        # Parse PES header to get payload start
-        pes_header_data_length = pkt[pes_start + 8] if pes_start + 8 < len(pkt) else 0
-        payload_start = pes_start + 9 + pes_header_data_length
-        if payload_start >= len(pkt):
-            continue
-        payload = pkt[payload_start:]
-        # Search for NAL units in payload
-        search_offset = 0
-        while True:
-            nal_idx = payload.find(b"\x00\x00\x01", search_offset)
-            if nal_idx == -1 or nal_idx + 4 > len(payload):
-                break
-            nal_type = payload[nal_idx + 3] & 0x1F
-            # print(f"[AP] PID={pid}, stream_id=0x{stream_id:02X} at offset={segment_offset + i}, NAL_type=0x{nal_type:02X}, NAL_offset={nal_idx}")
-            if nal_type == 5:
-                offsets.append(segment_offset + i)
-                break  # Only need first I-frame per packet
-            search_offset = nal_idx + 4
-    # print(f"[AP] Found {len(offsets)} I-frame offsets: {offsets if offsets else 'None'}")
-    try:
-        with open(ap_file_path, "ab") as apf:
-            if offsets:
-                for off in offsets:
-                    apf.write(struct.pack(">I", off))
-                print(f"[AP] Wrote {len(offsets)} offsets to {ap_file_path}")
-            else:
-                # Ensure .ap file exists even if no offsets found
-                apf.flush()
-                print(f"[AP] No I-frames found, .ap file touched: {ap_file_path}")
-    except Exception as e:
-        print(f"[AP] Error writing to .ap file {ap_file_path}: {e}")
-    return offsets
+        # Check for PES start
+        payload_unit_start = (pkt[1] & 0x40) >> 6
+        adaptation_field_control = (pkt[3] >> 4) & 0x3
+        index = 4
+        if adaptation_field_control in {2, 3}:
+            adaptation_field_length = pkt[4]
+            index += 1 + adaptation_field_length
+        if payload_unit_start:
+            pes_start = pkt.find(b"\x00\x00\x01", index)
+            if pes_start == -1:
+                continue
+            # Check for H.264/AVC or H.265/HEVC NAL units
+            # Find NAL unit start code (0x000001) after PES header
+            # PES header is at least 9 bytes after start code
+            pes_header_data_length = pkt[pes_start + 8] if pes_start + 8 < len(pkt) else 0
+            es_data_start = pes_start + 9 + pes_header_data_length
+            es_data = pkt[es_data_start:]
+            # Search for NAL start code (0x000001)
+            for j in range(len(es_data) - 4):
+                if es_data[j:j + 3] == b"\x00\x00\x01":
+                    nal_unit_type = es_data[j + 3] & 0x1F  # H.264
+                    if nal_unit_type == 5:
+                        return True  # IDR frame (keyframe)
+                    # H.265/HEVC: nal_unit_type is 6 bits (bits 1-6 of byte after start code)
+                    hevc_type = (es_data[j + 3] >> 1) & 0x3F
+                    if hevc_type in {19, 20}:
+                        return True  # IDR_W_RADL or IDR_N_LP
+    return False
 
 
 def is_valid_ts_segment(segment_data):
