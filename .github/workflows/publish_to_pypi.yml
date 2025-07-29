@@ -1,0 +1,55 @@
+# .github/workflows/workflow.yml
+
+# This workflow will upload a Python Package using Twine when a release is created.
+# For more information see: https://docs.github.com/en/actions/guides/building-and-testing-python
+
+name: Upload Python Package to PyPi
+
+on:
+  push:
+    tags:
+      - '*.*.*' # Triggers on version tags like 1.0.0
+  workflow_dispatch:
+
+# Define top-level permissions
+permissions:
+  contents: write        # Allows write access to repository contents (needed for checkout)
+  id-token: write
+  packages: write        # Allows uploading packages to GitHub Packages or external registries
+  actions: write         # Allows writing workflow run information
+
+jobs:
+  deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'  # Specify your Python version
+
+    - name: Add repository sub-modules
+      run: |
+        git submodule init
+        git submodule update
+
+    - name: Install build and Twine
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+
+    - name: Build the package
+      run: |
+        python -m build --sdist --wheel
+      # The '--sdist --wheel' flags are optional as 'python -m build' builds both by default
+
+    - name: Publish to TestPyPI
+      env:
+        TWINE_USERNAME: ${{ secrets.TEST_PYPI_USERNAME }}
+        TWINE_PASSWORD: ${{ secrets.TEST_PYPI_PASSWORD }}
+      run: |
+        twine upload --verbose --repository-url https://test.pypi.org/legacy/ dist/*
