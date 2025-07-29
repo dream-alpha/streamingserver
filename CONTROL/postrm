@@ -1,0 +1,8 @@
+#!/bin/sh
+if [ "$1" = "remove" ]; then
+	rm -rf /data/ubuntu/root/plugins/streamingserver > /dev/null 2>&1
+	echo "Plugin removed successfully."
+else
+	find /data/ubuntu/root/streamingserver -type f -name "*.pyc" -exec rm -f {} \; > /dev/null 2>&1
+fi
+exit 0
