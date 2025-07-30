@@ -1,6 +1,6 @@
 import json
 import socketserver
-from xml_playlist_utils import get_playlist
+from m3u8_playlist_utils import get_playlist
 
 
 # --- Socket server for command control ---
@@ -31,7 +31,7 @@ class RecorderCommandHandler(socketserver.BaseRequestHandler):
                     elif cmd == "stop":
                         self.server.recorder.stop()
                     elif cmd == "get_playlist":
-                        playlist = get_playlist("/root/plugins/streamingserver/playlists/de.xml")
+                        playlist = get_playlist("/root/plugins/streamingserver/data/plutotv-playlist.m3u8")
                         response = {"command": "get_playlist", "args": [playlist]}
                         self.request.sendall((json.dumps(response) + '\n').encode())
                     else:

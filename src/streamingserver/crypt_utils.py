@@ -1,27 +1,28 @@
 import traceback
 from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 
 
-def get_encryption_info(session, segment_encryption_info, encryption_info):
+def get_encryption_info(session, segment_encryption_info, global_encryption_info):
     # Use segment-specific encryption info if available, otherwise use global
-    effective_encryption = segment_encryption_info if segment_encryption_info else encryption_info
+    encryption_info = segment_encryption_info if segment_encryption_info else global_encryption_info
 
-    if effective_encryption.get("METHOD"):
-        segment_key = {
-            "METHOD": None,
-            "KEY": None,
-            "IV": None,
-            "URI": None
-        }
+    segment_key = {
+        "METHOD": None,
+        "KEY": None,
+        "IV": None,
+        "URI": None
+    }
 
-        segment_key["METHOD"] = effective_encryption.get("METHOD")
+    if encryption_info.get("METHOD"):
+        segment_key["METHOD"] = encryption_info.get("METHOD")
 
         # Download the encryption key if URI is provided
-        if effective_encryption.get("URI") and effective_encryption.get("METHOD") == "AES-128":
+        if encryption_info.get("URI") and encryption_info.get("METHOD") == "AES-128":
             try:
-                segment_key["KEY"] = download_encryption_key(session, effective_encryption["URI"])
+                segment_key["KEY"] = download_encryption_key(session, encryption_info["URI"])
                 # Process IV: convert from hex string to bytes if present
-                key_iv = effective_encryption.get("IV")
+                key_iv = encryption_info.get("IV")
                 if key_iv:
                     try:
                         segment_key["IV"] = bytes.fromhex(key_iv.replace("0x", ""))
@@ -83,7 +84,12 @@ def decrypt_segment(encrypted_data, segment_sequence, media_sequence_base, curre
         # Create AES cipher
         cipher = AES.new(current_key["KEY"], AES.MODE_CBC, iv)
         decrypted_data = cipher.decrypt(encrypted_data)
-
+        # Unpad after decryption (PKCS7, AES block size = 16)
+        try:
+            decrypted_data = unpad(decrypted_data, 16)
+        except Exception as e:
+            print(f"❌ Unpadding failed for segment {segment_sequence}: {e}")
+            return None
         # Log first 32 bytes of decrypted data for debug
         # print(f"[DECRYPT DEBUG] First 32 bytes: {decrypted_data[:32].hex()}")
 

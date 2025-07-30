@@ -1,11 +1,132 @@
-from typing import Tuple
 import os
 import subprocess
 import json
 import tempfile
+from debug import get_logger
+
+logger = get_logger(__name__, "DEBUG")
 
 
 TS_PACKET_SIZE = 188
+
+
+def find_video_pid_in_segment(segment_bytes: bytes) -> int:
+    """
+    Find the video PID in a TS segment by parsing PAT and PMT tables.
+    Returns the PID of the first video stream found (H.264/H.265), or None if not found.
+    """
+    def read_ts_packets(data):
+        for i in range(0, len(data), TS_PACKET_SIZE):
+            packet = data[i:i + TS_PACKET_SIZE]
+            if len(packet) == TS_PACKET_SIZE:
+                yield packet, i
+
+    pat_pid = 0x0000
+    pmt_pid = None
+    # --- Find PMT PID from PAT ---
+    for pkt, _ in read_ts_packets(segment_bytes):
+        if pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid == pat_pid:
+            pointer_field = pkt[4]
+            pat_start = 5 + pointer_field
+            if pat_start + 8 < len(pkt) and pkt[pat_start] == 0x00:
+                section_length = ((pkt[pat_start + 1] & 0x0F) << 8) | pkt[pat_start + 2]
+                program_info_start = pat_start + 8
+                program_info_end = pat_start + 3 + section_length - 4  # -4 for CRC
+                for j in range(program_info_start, program_info_end, 4):
+                    if j + 4 > len(pkt):
+                        break
+                    program_number = (pkt[j] << 8) | pkt[j + 1]
+                    if program_number == 0:
+                        continue  # network PID, skip
+                    pmt_pid_candidate = ((pkt[j + 2] & 0x1F) << 8) | pkt[j + 3]
+                    pmt_pid = pmt_pid_candidate
+                    break
+        if pmt_pid is not None:
+            break
+
+    if pmt_pid is None:
+        return None
+
+    # --- Find video PID from PMT ---
+    for pkt, _ in read_ts_packets(segment_bytes):
+        if pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid == pmt_pid:
+            pointer_field = pkt[4]
+            pmt_start = 5 + pointer_field
+            if pmt_start < len(pkt) and pkt[pmt_start] == 0x02:
+                section_length = ((pkt[pmt_start + 1] & 0x0F) << 8) | pkt[pmt_start + 2]
+                program_info_length = ((pkt[pmt_start + 10] & 0x0F) << 8) | pkt[pmt_start + 11]
+                idx = pmt_start + 12 + program_info_length
+                section_end = pmt_start + 3 + section_length - 4  # -4 for CRC
+                while idx + 5 <= min(section_end, len(pkt)):
+                    stream_type = pkt[idx]
+                    elementary_pid = ((pkt[idx + 1] & 0x1F) << 8) | pkt[idx + 2]
+                    es_info_length = ((pkt[idx + 3] & 0x0F) << 8) | pkt[idx + 4]
+                    if stream_type in {0x1B, 0x24}:  # H.264 or H.265
+                        return elementary_pid
+                    idx += 5 + es_info_length
+    return None
+
+
+def find_pat_pmt_in_segment(segment_bytes: bytes):
+    """
+    Find and return the first PAT and PMT TS packets and the index of the PAT packet in the segment.
+    Returns (pat_packet, pmt_packet, pat_index), or (None, None, -1) if not found.
+    """
+    pat_pid = 0x0000
+    pmt_pid = None
+    pat_packet = None
+    pmt_packet = None
+    pat_index = -1
+    # First, find PAT and extract PMT PID
+    for i in range(0, len(segment_bytes), TS_PACKET_SIZE):
+        pkt = segment_bytes[i:i + TS_PACKET_SIZE]
+        if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid == pat_pid:
+            pointer_field = pkt[4]
+            pat_start = 5 + pointer_field
+            if pat_start + 8 < len(pkt) and pkt[pat_start] == 0x00:
+                section_length = ((pkt[pat_start + 1] & 0x0F) << 8) | pkt[pat_start + 2]
+                program_info_start = pat_start + 8
+                program_info_end = pat_start + 3 + section_length - 4  # -4 for CRC
+                for j in range(program_info_start, program_info_end, 4):
+                    if j + 4 > len(pkt):
+                        break
+                    program_number = (pkt[j] << 8) | pkt[j + 1]
+                    if program_number == 0:
+                        continue  # network PID, skip
+                    pmt_pid_candidate = ((pkt[j + 2] & 0x1F) << 8) | pkt[j + 3]
+                    pmt_pid = pmt_pid_candidate
+                    pat_packet = pkt
+                    pat_index = i // TS_PACKET_SIZE
+                    break
+        if pat_packet is not None and pmt_pid is not None:
+            break
+
+    if pmt_pid is None or pat_packet is None:
+        return None, None, -1
+
+    # Now, find PMT packet
+    for i in range(0, len(segment_bytes), TS_PACKET_SIZE):
+        pkt = segment_bytes[i:i + TS_PACKET_SIZE]
+        if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid == pmt_pid:
+            pointer_field = pkt[4]
+            pmt_start = 5 + pointer_field
+            if pmt_start < len(pkt) and pkt[pmt_start] == 0x02:
+                pmt_packet = pkt
+                break
+
+    return pat_packet, pmt_packet, pat_index
 
 
 def find_gop_start_in_segment(segment_bytes: bytes):
@@ -36,7 +157,7 @@ def find_gop_start_in_segment(segment_bytes: bytes):
     def get_payload(packet):
         adaptation = (packet[3] >> 4) & 0x3
         offset = 4
-        if adaptation in (2, 3):  # has adaptation field
+        if adaptation in {2, 3}:  # has adaptation field
             offset += 1 + packet[4]
         return packet[offset:]
 
@@ -76,9 +197,9 @@ def find_gop_start_in_segment(segment_bytes: bytes):
                 idx = 12 + program_info_len
                 while idx < len(section) - 4:
                     stream_type = section[idx]
-                    elementary_pid = ((section[idx+1] & 0x1F) << 8) | section[idx+2]
-                    es_info_len = ((section[idx+3] & 0x0F) << 8) | section[idx+4]
-                    if stream_type in (0x1B, 0x24):  # H.264 or H.265
+                    elementary_pid = ((section[idx + 1] & 0x1F) << 8) | section[idx + 2]
+                    es_info_len = ((section[idx + 3] & 0x0F) << 8) | section[idx + 4]
+                    if stream_type in {0x1B, 0x24}:  # H.264 or H.265
                         video_pid = elementary_pid
                         break
                     idx += 5 + es_info_len
@@ -89,40 +210,39 @@ def find_gop_start_in_segment(segment_bytes: bytes):
 
             i = 0
             while i < len(pes_buffer) - 4:
-                if pes_buffer[i:i+3] == b'\x00\x00\x01':
-                    nal_type = pes_buffer[i+3] & 0x1F
+                if pes_buffer[i:i + 3] == b'\x00\x00\x01':
+                    nal_type = pes_buffer[i + 3] & 0x1F
                     if nal_type == 7:
                         sps_seen = True
                     elif nal_type == 8:
                         pps_seen = True
                     elif nal_type == 5:
                         if sps_seen and pps_seen:
-                            return pkt_offset, video_pid, last_pat_pkt, last_pmt_pkt
+                            return pkt_offset // TS_PACKET_SIZE, video_pid, last_pat_pkt, last_pmt_pkt
                 i += 1
 
     return -1, None, None, None
 
 
-def update_continuity_counters(segment: bytes, starting_cc: int) -> Tuple[int, bytes]:
+def update_continuity_counters(segment: bytes, cc_map: dict) -> tuple[bytes, dict]:
     """
-    Incrementally update the continuity counter (CC) for all TS packets in a segment.
-    Input: starting_cc (int, 0-15), segment (bytes)
-    Returns: (last_cc, modified_segment)
+    Incrementally update the continuity counter (CC) for all TS packets in a segment, per PID.
+    Input: cc_map (dict {pid: cc}), segment (bytes)
+    Returns: (modified_segment, updated_cc_map)
     """
-    if len(segment) % TS_PACKET_SIZE != 0:
-        raise ValueError("Segment size is not a multiple of TS_PACKET_SIZE")
     out = bytearray()
-    cc = starting_cc & 0x0F
+    cc_map = cc_map.copy() if cc_map else {}
     for i in range(0, len(segment), TS_PACKET_SIZE):
-        pkt = bytearray(segment[i:i+TS_PACKET_SIZE])
+        pkt = bytearray(segment[i:i + TS_PACKET_SIZE])
         if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
             out.extend(pkt)
             continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        cc = ((cc_map.get(pid, -1) + 1) & 0x0F)
         pkt[3] = (pkt[3] & 0xF0) | cc
         out.extend(pkt)
-        cc = (cc + 1) & 0x0F
-    last_cc = (cc - 1) & 0x0F if len(segment) > 0 else starting_cc
-    return last_cc, bytes(out)
+        cc_map[pid] = cc
+    return bytes(out), cc_map
 
 
 def read_continuity_counter(ts_packet: bytes) -> int:
@@ -138,24 +258,29 @@ def read_continuity_counter(ts_packet: bytes) -> int:
     return ts_packet[3] & 0x0F
 
 
-def make_discontinuity_packet(pid: int = 0x1FFF, continuity_counter: int = 0) -> bytes:
+def make_discontinuity_packet(pid: int = 0x1FFF, cc_map: dict = None) -> tuple[bytes, dict]:
     """
     Create a single MPEG-TS packet (188 bytes) with only the discontinuity flag set in the adaptation field.
-    By default, uses null packet PID (0x1FFF) and continuity_counter=0.
+    Uses and updates cc_map for the given PID. Returns (packet_bytes, updated_cc_map).
     """
+    if cc_map is None:
+        cc_map = {}
+    cc = ((cc_map.get(pid, -1) + 1) & 0x0F)
     packet = bytearray(188)
     packet[0] = 0x47  # Sync byte
     # Set PID
     packet[1] = 0x40 | ((pid >> 8) & 0x1F)  # payload_unit_start_indicator=0, PID high bits
     packet[2] = pid & 0xFF  # PID low bits
     # Adaptation field only, no payload
-    packet[3] = 0x20 | (continuity_counter & 0x0F)  # adaptation_field_control=2
+    packet[3] = 0x20 | (cc & 0x0F)  # adaptation_field_control=2
     packet[4] = 1  # adaptation_field_length=1 (only flags byte)
     packet[5] = 0x80  # discontinuity_indicator=1
     # Stuffing bytes (0xFF) for rest of adaptation field (none needed here, since length=1)
     for i in range(6, 188):
         packet[i] = 0xFF
-    return bytes(packet)
+    cc_map = cc_map.copy()
+    cc_map[pid] = cc
+    return bytes(packet), cc_map
 
 
 def segment_has_pat_pmt(segment_data: bytes) -> int:
@@ -251,7 +376,7 @@ def segment_has_keyframe(segment_data: bytes) -> int:
 def is_valid_ts_segment(segment_data):
     """Check if segment_data is a valid MPEG-TS segment (sync and video PID)."""
     if not segment_data or len(segment_data) < 188:
-        print("[TS_ANALYZE] Segment too short or empty.")
+        logger.debug(f"[TS_ANALYZE] Segment too short or empty: {len(segment_data)}")
         return False
     sync_count = 0
     pid_counter = {}
@@ -318,7 +443,7 @@ def set_discontinuity_segment(segment, force=False):
         pkt = segment[i: i + TS_PACKET_SIZE]
         if len(pkt) == TS_PACKET_SIZE and pkt[0] == 0x47:
             pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-            if pid not in seen_pids:
+            if pid != 0 and pid not in seen_pids:
                 pkt = set_discontinuity_flag(pkt, force)
                 seen_pids.add(pid)
         out.extend(pkt)
@@ -455,6 +580,7 @@ def read_pcr(ts_record: bytes):
     if adaptation_field_control in {2, 3}:
         adaptation_field_length = ts_record[4]
         if adaptation_field_length >= 7 and (ts_record[5] & 0x10):
+            # PCR is 6 bytes: base (33 bits), reserved (6 bits), extension (9 bits)
             pcr_base = (
                 (ts_record[6] << 25)
                 | (ts_record[7] << 17)
@@ -462,11 +588,17 @@ def read_pcr(ts_record: bytes):
                 | (ts_record[9] << 1)
                 | (ts_record[10] >> 7)
             )
-            return pcr_base
+            pcr_ext = ((ts_record[10] & 0x01) << 8) | ts_record[11]
+            return (pcr_base, pcr_ext)
     return None
 
 
 def write_pcr(ts_record: bytes, new_pcr: int) -> bytes:
+    """
+    Write PCR base and extension to a TS packet. new_pcr can be:
+      - int: only base (extension set to 0)
+      - tuple: (base, ext)
+    """
     if len(ts_record) != TS_PACKET_SIZE:
         return ts_record
 
@@ -476,11 +608,17 @@ def write_pcr(ts_record: bytes, new_pcr: int) -> bytes:
         if adaptation_field_length >= 7:
             modified = bytearray(ts_record)
             modified[5] |= 0x10  # Ensure PCR flag set
-            modified[6] = (new_pcr >> 25) & 0xFF
-            modified[7] = (new_pcr >> 17) & 0xFF
-            modified[8] = (new_pcr >> 9) & 0xFF
-            modified[9] = (new_pcr >> 1) & 0xFF
-            modified[10] = ((new_pcr & 0x1) << 7) | 0x7E  # reserved + zeroed extension
+            if isinstance(new_pcr, tuple):
+                pcr_base, pcr_ext = new_pcr
+            else:
+                pcr_base = new_pcr
+                pcr_ext = 0
+            modified[6] = (pcr_base >> 25) & 0xFF
+            modified[7] = (pcr_base >> 17) & 0xFF
+            modified[8] = (pcr_base >> 9) & 0xFF
+            modified[9] = (pcr_base >> 1) & 0xFF
+            modified[10] = ((pcr_base & 0x1) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01)
+            modified[11] = pcr_ext & 0xFF
             return bytes(modified)
     return ts_record
 
@@ -509,6 +647,9 @@ def shift_pcr(ts_record: bytes, offset: int) -> bytes:
     pcr = read_pcr(ts_record)
     if pcr is None:
         return ts_record
+    if isinstance(pcr, tuple):
+        base, ext = pcr
+        return write_pcr(ts_record, (base + offset, ext))
     return write_pcr(ts_record, pcr + offset)
 
 
