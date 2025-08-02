@@ -6,8 +6,32 @@ from debug import get_logger
 
 logger = get_logger(__name__, "DEBUG")
 
-
 TS_PACKET_SIZE = 188
+
+
+def get_pcr_diff(segment_data: bytes):
+    """
+    Return the difference between the first two PCR base values found in the segment.
+    Returns the diff as an integer (PCR2_base - PCR1_base), or None if fewer than 2 PCRs are found.
+    """
+    first_pcr = None
+    second_pcr = None
+    for i in range(0, len(segment_data) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
+        pkt = segment_data[i:i + TS_PACKET_SIZE]
+        pcr = read_pcr(pkt)
+        if pcr is not None:
+            if isinstance(pcr, tuple):
+                base, _ = pcr
+            else:
+                base = pcr
+            if first_pcr is None:
+                first_pcr = base
+            elif second_pcr is None:
+                second_pcr = base
+                break
+    if first_pcr is not None and second_pcr is not None:
+        return first_pcr, second_pcr - first_pcr
+    return None, None
 
 
 def find_video_pid_in_segment(segment_bytes: bytes) -> int:
@@ -413,7 +437,8 @@ def is_valid_ts_segment(segment_data):
             continue
         pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
         if pid == 256 or (0x100 <= pid <= 0x1FF):
-            pts, dts = read_pts_dts(pkt)
+            pts = read_pts(pkt)
+            dts = read_dts(pkt)
             if pts is not None and (dts is not None or dts is None):
                 pts_dts_valid_count += 1
             else:
@@ -433,19 +458,69 @@ def is_valid_ts_segment(segment_data):
     return has_valid_sync and majority_video_pid and has_valid_pts_dts
 
 
-def set_discontinuity_segment(segment, force=False):
+def set_discontinuity_segment(segment):
     """Set the discontinuity flag for all TS packets in a segment."""
     if len(segment) < TS_PACKET_SIZE:
         raise ValueError("Segment too small for TS packet")
     out = bytearray()
-    seen_pids = set()
+    # Find all elementary stream PIDs (video, audio, etc.) from PMT
+    pmt_pid = None
+    es_pids = set()
+    pat_pids = set([0x0000])
+    # Scan for PAT/PMT
+    for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
+        pkt = segment[i: i + TS_PACKET_SIZE]
+        if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid == 0x0000:  # PAT
+            pointer_field = pkt[4]
+            pat_start = 5 + pointer_field
+            if pat_start + 8 < len(pkt) and pkt[pat_start] == 0x00:
+                section_length = ((pkt[pat_start + 1] & 0x0F) << 8) | pkt[pat_start + 2]
+                program_info_start = pat_start + 8
+                program_info_end = pat_start + 3 + section_length - 4
+                for j in range(program_info_start, program_info_end, 4):
+                    if j + 4 > len(pkt):
+                        break
+                    program_number = (pkt[j] << 8) | pkt[j + 1]
+                    if program_number == 0:
+                        continue
+                    pmt_pid_candidate = ((pkt[j + 2] & 0x1F) << 8) | pkt[j + 3]
+                    pmt_pid = pmt_pid_candidate
+                    break
+        if pmt_pid is not None:
+            break
+    # Now scan for elementary stream PIDs in PMT
+    if pmt_pid is not None:
+        for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
+            pkt = segment[i: i + TS_PACKET_SIZE]
+            if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
+                continue
+            pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+            if pid == pmt_pid:
+                pointer_field = pkt[4]
+                pmt_start = 5 + pointer_field
+                if pmt_start < len(pkt) and pkt[pmt_start] == 0x02:
+                    section_length = ((pkt[pmt_start + 1] & 0x0F) << 8) | pkt[pmt_start + 2]
+                    program_info_length = ((pkt[pmt_start + 10] & 0x0F) << 8) | pkt[pmt_start + 11]
+                    idx = pmt_start + 12 + program_info_length
+                    section_end = pmt_start + 3 + section_length - 4
+                    while idx + 5 <= min(section_end, len(pkt)):
+                        _stream_type = pkt[idx]
+                        elementary_pid = ((pkt[idx + 1] & 0x1F) << 8) | pkt[idx + 2]
+                        es_info_length = ((pkt[idx + 3] & 0x0F) << 8) | pkt[idx + 4]
+                        es_pids.add(elementary_pid)
+                        idx += 5 + es_info_length
+                break
+    # Set discontinuity flag in all PAT, PMT, and elementary stream packets
     for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
         pkt = segment[i: i + TS_PACKET_SIZE]
         if len(pkt) == TS_PACKET_SIZE and pkt[0] == 0x47:
             pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-            if pid != 0 and pid not in seen_pids:
-                pkt = set_discontinuity_flag(pkt, force)
-                seen_pids.add(pid)
+            # Set for PAT, PMT, and all elementary stream PIDs
+            if pid in pat_pids or pid == pmt_pid or pid in es_pids:
+                pkt = set_discontinuity_flag(pkt)
         out.extend(pkt)
     # Append any trailing bytes (if segment is not a multiple of TS_PACKET_SIZE)
     if len(segment) % TS_PACKET_SIZE:
@@ -460,8 +535,8 @@ def shift_segment(segment: bytes, offset: int) -> bytes:
     """
     out = bytearray()
     for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
-        ts_record = segment[i: i + TS_PACKET_SIZE]
-        shifted = shift_ts_record(ts_record, offset)
+        ts_packet = segment[i: i + TS_PACKET_SIZE]
+        shifted = shift_ts_packet(ts_packet, offset)
         out.extend(shifted)
     # Append any trailing bytes (if segment is not a multiple of TS_PACKET_SIZE)
     if len(segment) % TS_PACKET_SIZE:
@@ -478,8 +553,8 @@ def read_pts_from_segment(segment: bytes):
     first_pts = None
     last_pts = None
     for idx in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
-        ts_record = segment[idx: idx + TS_PACKET_SIZE]
-        pts = read_pts(ts_record)
+        ts_packet = segment[idx: idx + TS_PACKET_SIZE]
+        pts = read_pts(ts_packet)
         if pts is not None:
             if first_pts is None:
                 first_pts = pts
@@ -488,50 +563,65 @@ def read_pts_from_segment(segment: bytes):
     return first_pts, last_pts
 
 
-def read_pts_dts(ts_record: bytes):
-    if len(ts_record) != TS_PACKET_SIZE:
-        return None, None
-
-    if ts_record[0] != 0x47:
-        return None, None
-
-    # payload_unit_start = (ts_record[1] & 0x40) >> 6
-    adaptation_field_control = (ts_record[3] >> 4) & 0x3
-
+def read_pts(ts_packet: bytes):
+    """
+    Extract PTS from a TS packet. Returns PTS value or None.
+    """
+    if len(ts_packet) != TS_PACKET_SIZE:
+        return None
+    if ts_packet[0] != 0x47:
+        return None
+    adaptation_field_control = (ts_packet[3] >> 4) & 0x3
     index = 4
     if adaptation_field_control in {2, 3}:
-        adaptation_field_length = ts_record[4]
+        adaptation_field_length = ts_packet[4]
         index += 1 + adaptation_field_length
-
-    # Debug print for diagnosis
-    # print(f"TS packet: sync={ts_record[0]:02x}, payload_unit_start={payload_unit_start}, adaptation_field_control={adaptation_field_control}, index={index}")
-    # print(f"Bytes at index: {ts_record[index:index+16].hex()}")
-
-    # Scan for PES header start code after adaptation field
-    pes_start = ts_record.find(b"\x00\x00\x01", index)
+    pes_start = ts_packet.find(b"\x00\x00\x01", index)
     if pes_start == -1:
-        return None, None
-
-    # Check for valid PES header
-    if pes_start + 9 + 5 > len(ts_record):
-        return None, None
-
-    # stream_id = ts_record[pes_start+3]
-    # pes_header_data_length = ts_record[pes_start+8]
-    flags = ts_record[pes_start + 7]
+        return None
+    # Check PES header bounds
+    if pes_start + 14 > len(ts_packet):
+        return None
+    pes_header_len = ts_packet[pes_start + 8]
+    flags = ts_packet[pes_start + 7]
     pts_dts_flags = (flags >> 6) & 0x3
-
-    pts = dts = None
-    if pts_dts_flags & 0x2:
-        pts_bytes = ts_record[pes_start + 9: pes_start + 14]
+    # Only read PTS if PTS-only (0b10) or PTS+DTS (0b11) is set and header length is sufficient
+    if pts_dts_flags == 0x2 and pes_header_len >= 5:
+        pts_bytes = ts_packet[pes_start + 9: pes_start + 14]
         if len(pts_bytes) == 5:
-            pts = decode_pts_dts(pts_bytes)
-    if pts_dts_flags == 0x3:
-        dts_bytes = ts_record[pes_start + 14: pes_start + 19]
-        if len(dts_bytes) == 5:
-            dts = decode_pts_dts(dts_bytes)
+            return decode_pts_dts(pts_bytes)
+    elif pts_dts_flags == 0x3 and pes_header_len >= 10:
+        pts_bytes = ts_packet[pes_start + 9: pes_start + 14]
+        if len(pts_bytes) == 5:
+            return decode_pts_dts(pts_bytes)
+    return None
 
-    return pts, dts
+
+def read_dts(ts_packet: bytes):
+    """
+    Extract DTS from a TS packet. Returns DTS value or None.
+    """
+    if len(ts_packet) != TS_PACKET_SIZE:
+        return None
+    if ts_packet[0] != 0x47:
+        return None
+    adaptation_field_control = (ts_packet[3] >> 4) & 0x3
+    index = 4
+    if adaptation_field_control in {2, 3}:
+        adaptation_field_length = ts_packet[4]
+        index += 1 + adaptation_field_length
+    pes_start = ts_packet.find(b"\x00\x00\x01", index)
+    if pes_start == -1:
+        return None
+    if pes_start + 14 + 5 > len(ts_packet):
+        return None
+    flags = ts_packet[pes_start + 7]
+    pts_dts_flags = (flags >> 6) & 0x3
+    if pts_dts_flags == 0x3:
+        dts_bytes = ts_packet[pes_start + 14: pes_start + 19]
+        if len(dts_bytes) == 5:
+            return decode_pts_dts(dts_bytes)
+    return None
 
 
 def decode_pts_dts(data: bytes):
@@ -548,143 +638,321 @@ def encode_pts_dts(value: int, flag_bits: int) -> bytes:
     val = (flag_bits << 4) | (((value >> 30) & 0x07) << 1) | 0x01
     val2 = (((value >> 15) & 0x7FFF) << 1) | 0x01
     val3 = ((value & 0x7FFF) << 1) | 0x01
-    return bytes(
-        [val, (val2 >> 8) & 0xFF, val2 & 0xFF, (val3 >> 8) & 0xFF, val3 & 0xFF]
-    )
+    return bytes([
+        val,
+        (val2 >> 8) & 0xFF,
+        val2 & 0xFF,
+        (val3 >> 8) & 0xFF,
+        val3 & 0xFF
+    ])
 
 
-def write_pts(ts_record: bytes, new_pts: int) -> bytes:
-    pts, _dts = read_pts_dts(ts_record)
+# helper: encode_pts_dts_preserve
+def encode_pts_dts_preserve(value: int, orig_bytes: bytes) -> bytes:
+    """
+    Encode PTS/DTS, preserving marker and reserved bits from orig_bytes.
+    """
+    if len(orig_bytes) != 5:
+        return encode_pts_dts(value, 0b10)
+    # Extract bits from orig_bytes
+    # Byte 0: 4 bits flags, 3 bits timestamp, 1 marker
+    # Byte 1: 8 bits timestamp
+    # Byte 2: 7 bits timestamp, 1 marker
+    # Byte 3: 8 bits timestamp
+    # Byte 4: 7 bits timestamp, 1 marker
+    b0 = (orig_bytes[0] & 0xF0) | (((value >> 30) & 0x07) << 1) | (orig_bytes[0] & 0x01)
+    b1 = (value >> 22) & 0xFF
+    b2 = ((orig_bytes[2] & 0x01) | (((value >> 15) & 0x7F) << 1))
+    b3 = (value >> 7) & 0xFF
+    b4 = ((orig_bytes[4] & 0x01) | (((value & 0x7F) << 1)))
+    return bytes([b0, b1, b2, b3, b4])
+
+
+def write_pts(ts_packet: bytes, new_pts: int) -> bytes:
+    """
+    Overwrite only the PTS field in the TS packet PES header.
+    """
+    pts = read_pts(ts_packet)
     if pts is None:
-        return ts_record
+        return ts_packet
 
-    modified = bytearray(ts_record)
-    new_pts_bytes = encode_pts_dts(new_pts, 0b10)
-    payload_start = modified.find(b"\x00\x00\x01")
+    payload_start = ts_packet.find(b"\x00\x00\x01")
     if payload_start == -1:
-        return ts_record
+        return ts_packet
+
+    # Get original PTS bytes
+    orig_pts_bytes = ts_packet[payload_start + 9: payload_start + 14]
+    new_pts_bytes = encode_pts_dts_preserve(new_pts, orig_pts_bytes)
+
+    if orig_pts_bytes == new_pts_bytes:
+        # No change needed, and encoding matches
+        return ts_packet
+    # Write new PTS, preserving marker/reserved bits
+    modified = bytearray(ts_packet)
     modified[payload_start + 9: payload_start + 14] = new_pts_bytes
     return bytes(modified)
 
 
-def read_pts(ts_record: bytes):
-    pts, _ = read_pts_dts(ts_record)
-    return pts
+def write_dts(ts_packet: bytes, new_dts: int) -> bytes:
+    """
+    Overwrite only the DTS field in the TS packet PES header.
+    """
+    dts = read_dts(ts_packet)
+    if dts is None:
+        return ts_packet
+
+    modified = bytearray(ts_packet)
+    payload_start = modified.find(b"\x00\x00\x01")
+    if payload_start == -1:
+        return ts_packet
+
+    # Fix flags: ensure PTS+DTS (0b11) is set, and marker bits preserved
+    pes_flags_offset = payload_start + 7
+    pes_flags = modified[pes_flags_offset]
+    pes_flags = (pes_flags & 0x3F) | 0xC0  # Set PTS+DTS (0b11 << 6)
+    modified[pes_flags_offset] = pes_flags
+
+    # Fix PES header length if needed (should be at least 10 for PTS+DTS)
+    pes_header_len_offset = payload_start + 8
+    pes_header_len = modified[pes_header_len_offset]
+    if pes_header_len < 10:
+        modified[pes_header_len_offset] = 10
+
+    # Write new DTS
+    new_dts_bytes = encode_pts_dts(new_dts, 0b01)
+    modified[payload_start + 14: payload_start + 19] = new_dts_bytes
+    return bytes(modified)
 
 
-def read_pcr(ts_record: bytes):
-    if len(ts_record) != TS_PACKET_SIZE:
+def read_pcr(ts_packet: bytes):
+    if len(ts_packet) != TS_PACKET_SIZE:
         return None
 
-    adaptation_field_control = (ts_record[3] >> 4) & 0x3
-    if adaptation_field_control in {2, 3}:
-        adaptation_field_length = ts_record[4]
-        if adaptation_field_length >= 7 and (ts_record[5] & 0x10):
-            # PCR is 6 bytes: base (33 bits), reserved (6 bits), extension (9 bits)
-            pcr_base = (
-                (ts_record[6] << 25)
-                | (ts_record[7] << 17)
-                | (ts_record[8] << 9)
-                | (ts_record[9] << 1)
-                | (ts_record[10] >> 7)
-            )
-            pcr_ext = ((ts_record[10] & 0x01) << 8) | ts_record[11]
-            return (pcr_base, pcr_ext)
-    return None
+    adaptation_field_control = (ts_packet[3] >> 4) & 0x3
+    if adaptation_field_control not in {2, 3}:
+        return None
+
+    adaptation_field_length = ts_packet[4]
+    # Must be at least 7 bytes for PCR
+    if adaptation_field_length < 7:
+        return None
+
+    # PCR flag must be set
+    if not (ts_packet[5] & 0x10):
+        return None
+
+    # Reserved bits in PCR (bits 6-1 of byte 10) must be 0x7E (111111)
+    if (ts_packet[10] & 0x7E) != 0x7E:
+        return None
+
+    # PCR is 6 bytes: base (33 bits), reserved (6 bits), extension (9 bits)
+    pcr_base = (
+        (ts_packet[6] << 25)
+        | (ts_packet[7] << 17)
+        | (ts_packet[8] << 9)
+        | (ts_packet[9] << 1)
+        | (ts_packet[10] >> 7)
+    )
+    pcr_ext = ((ts_packet[10] & 0x01) << 8) | ts_packet[11]
+    return (pcr_base, pcr_ext)
 
 
-def write_pcr(ts_record: bytes, new_pcr: int) -> bytes:
+def write_pcr(ts_packet: bytes, new_pcr: int | tuple[int, int]) -> bytes:  # pylint: disable=unsupported-binary-operation
     """
     Write PCR base and extension to a TS packet. new_pcr can be:
       - int: only base (extension set to 0)
       - tuple: (base, ext)
     """
-    if len(ts_record) != TS_PACKET_SIZE:
-        return ts_record
+    if len(ts_packet) != TS_PACKET_SIZE:
+        return ts_packet
 
-    adaptation_field_control = (ts_record[3] >> 4) & 0x3
+    adaptation_field_control = (ts_packet[3] >> 4) & 0x3
+    modified = bytearray(ts_packet)
+
+    # If no adaptation field, add one (set adaptation_field_control to 3, insert field)
+    if adaptation_field_control == 1:
+        # Only payload present, need to add adaptation field
+        modified[3] = (modified[3] & 0xCF) | 0x20  # set adaptation_field_control to 3
+        modified.insert(4, 0)  # adaptation_field_length placeholder
+        modified.insert(5, 0)  # flags placeholder
+        # Stuffing to keep packet size
+        while len(modified) < TS_PACKET_SIZE:
+            modified.append(0xFF)
+        adaptation_field_control = 3
+
     if adaptation_field_control in {2, 3}:
-        adaptation_field_length = ts_record[4]
-        if adaptation_field_length >= 7:
-            modified = bytearray(ts_record)
-            modified[5] |= 0x10  # Ensure PCR flag set
-            if isinstance(new_pcr, tuple):
-                pcr_base, pcr_ext = new_pcr
-            else:
-                pcr_base = new_pcr
-                pcr_ext = 0
-            modified[6] = (pcr_base >> 25) & 0xFF
-            modified[7] = (pcr_base >> 17) & 0xFF
-            modified[8] = (pcr_base >> 9) & 0xFF
-            modified[9] = (pcr_base >> 1) & 0xFF
-            modified[10] = ((pcr_base & 0x1) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01)
-            modified[11] = pcr_ext & 0xFF
-            return bytes(modified)
-    return ts_record
+        adaptation_field_length = modified[4]
+        # If adaptation field too short, expand it to at least 7 bytes
+        if adaptation_field_length < 7:
+            # Insert extra bytes after flags to reach 7
+            extra = 7 - adaptation_field_length
+            # Insert after flags (at offset 5)
+            for _ in range(extra):
+                modified.insert(6, 0xFF)
+            adaptation_field_length = 7
+            modified[4] = adaptation_field_length
+            # If packet too long, trim
+            if len(modified) > TS_PACKET_SIZE:
+                modified = modified[:TS_PACKET_SIZE]
+
+        # Set PCR flag
+        modified[5] |= 0x10
+
+        # Write PCR at offset 6
+        if isinstance(new_pcr, tuple):
+            pcr_base, pcr_ext = new_pcr
+        else:
+            pcr_base = new_pcr
+            pcr_ext = 0
+        modified[6] = (pcr_base >> 25) & 0xFF
+        modified[7] = (pcr_base >> 17) & 0xFF
+        modified[8] = (pcr_base >> 9) & 0xFF
+        modified[9] = (pcr_base >> 1) & 0xFF
+        modified[10] = ((pcr_base & 0x1) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01)
+        modified[11] = pcr_ext & 0xFF
+        return bytes(modified)
+    return ts_packet
 
 
-def shift_pts_dts(ts_record: bytes, offset: int) -> bytes:
-    pts, dts = read_pts_dts(ts_record)
+def shift_pts(ts_packet: bytes, offset: int) -> bytes:
+    """
+    Shift only the PTS value in the TS packet by the given offset.
+    """
+    pts = read_pts(ts_packet)
     if pts is None:
-        return ts_record
+        return ts_packet
 
-    modified = bytearray(ts_record)
+    new_pts = pts + offset
+    if new_pts == pts:
+        # No change needed
+        return ts_packet
+
+    # Only update the PTS field, preserve all other header fields and flags
+    modified = bytearray(ts_packet)
     payload_start = modified.find(b"\x00\x00\x01")
     if payload_start == -1:
-        return ts_record
+        return ts_packet
 
-    new_pts_bytes = encode_pts_dts(pts + offset, 0b10)
+    # Write new PTS (do not touch flags or header length)
+    new_pts_bytes = encode_pts_dts(new_pts, 0b10)
     modified[payload_start + 9: payload_start + 14] = new_pts_bytes
-
-    if dts is not None:
-        new_dts_bytes = encode_pts_dts(dts + offset, 0b01)
-        modified[payload_start + 14: payload_start + 19] = new_dts_bytes
-
     return bytes(modified)
 
 
-def shift_pcr(ts_record: bytes, offset: int) -> bytes:
-    pcr = read_pcr(ts_record)
+def shift_dts(ts_packet: bytes, offset: int) -> bytes:
+    """
+    Shift only the DTS value in the TS packet by the given offset.
+    """
+    dts = read_dts(ts_packet)
+    if dts is None:
+        return ts_packet
+
+    new_dts = dts + offset
+    if new_dts == dts:
+        # No change needed
+        return ts_packet
+
+    modified = bytearray(ts_packet)
+    payload_start = modified.find(b"\x00\x00\x01")
+    if payload_start == -1:
+        return ts_packet
+
+    # Get original DTS bytes
+    orig_dts_bytes = modified[payload_start + 14: payload_start + 19]
+    new_dts_bytes = encode_pts_dts_preserve(new_dts, orig_dts_bytes)
+
+    if orig_dts_bytes == new_dts_bytes:
+        # No change needed, and encoding matches
+        return ts_packet
+    # Write new DTS, preserving marker/reserved bits
+    modified[payload_start + 14: payload_start + 19] = new_dts_bytes
+    return bytes(modified)
+
+
+def shift_pcr(ts_packet: bytes, offset: int) -> bytes:
+    pcr = read_pcr(ts_packet)
     if pcr is None:
-        return ts_record
-    if isinstance(pcr, tuple):
-        base, ext = pcr
-        return write_pcr(ts_record, (base + offset, ext))
-    return write_pcr(ts_record, pcr + offset)
+        return ts_packet
+    base, ext = pcr
+    return write_pcr(ts_packet, (base + offset, ext))
 
 
-def shift_ts_record(ts_record: bytes, offset: int) -> bytes:
-    ts_record = shift_pts_dts(ts_record, offset)
-    ts_record = shift_pcr(ts_record, offset)
-    return ts_record
+def shift_ts_packet(ts_packet: bytes, offset: int) -> bytes:
+    # logger.debug(f">>> Shifting TS packet by offset={offset}, pcr={pcr}")
+
+    pts = read_pts(ts_packet)
+    if pts is not None:
+        # logger.debug(f">>> PTS before shift: {pts1}")
+        ts_packet = shift_pts(ts_packet, offset)
+
+    dts = read_dts(ts_packet)
+    if dts is not None:
+        # logger.debug(f">>> DTS before shift: {dts1}")
+        ts_packet = shift_dts(ts_packet, offset)
+
+    pcr1 = read_pcr(ts_packet)
+    if pcr1 is not None:
+        # logger.debug(f">>> PCR before shift: {pcr1}")
+        ts_packet = shift_pcr(ts_packet, offset)
+
+    return ts_packet
 
 
-def set_discontinuity_flag(ts_record: bytes, force: bool = False) -> bytes:
-    if len(ts_record) != TS_PACKET_SIZE:
+def shift_ts_packet_test(ts_packet: bytes, offset: int) -> bytes:
+    # logger.debug(f">>> Shifting TS packet by offset={offset}, pcr={pcr}")
+    # logger.debug(f"TS packet before shift: {ts_packet.hex()}")
+
+    pts1 = read_pts(ts_packet)
+    if pts1 is not None:
+        # logger.debug(f">>> PTS before shift: {pts1}")
+        ts_packet2 = shift_pts(ts_packet, offset)
+        _pts2 = read_pts(ts_packet2)
+        # logger.debug(f">>> PTS after shift: {pts2}")
+        # if pts2 != pts1:
+        #     logger.error(f">>> PTS changed after shift: {pts1} -> {pts2}")
+        if ts_packet != ts_packet2:
+            logger.error(f">>> TS packet changed after PTS shift: {ts_packet.hex()} -> {ts_packet2.hex()}")
+        ts_packet = ts_packet2
+
+    dts1 = read_dts(ts_packet)
+    if dts1 is not None:
+        # logger.debug(f">>> DTS before shift: {dts1}")
+        ts_packet2 = shift_dts(ts_packet, offset)
+        _dts2 = read_dts(ts_packet2)
+        # logger.debug(f">>> DTS after shift: {dts2}")
+        # if dts2 != dts1:
+        #     logger.error(f">>> DTS changed after shift: {dts1} -> {dts2}")
+        if ts_packet != ts_packet2:
+            logger.error(f">>> TS packet changed after DTS shift: {ts_packet.hex()} -> {ts_packet2.hex()}")
+        ts_packet = ts_packet2
+
+    pcr1 = read_pcr(ts_packet)
+    if pcr1 is not None:
+        # logger.debug(f">>> PCR before shift: {pcr1}")
+        ts_packet2 = shift_pcr(ts_packet, pcr1)
+        if ts_packet != ts_packet2:
+            logger.error(f">>> TS packet changed after PCR shift: {ts_packet.hex()} -> {ts_packet2.hex()}")
+        ts_packet = ts_packet2
+    # logger.debug(f">>> TS packet after shift: {ts_packet.hex()}")
+    return ts_packet
+
+
+def set_discontinuity_flag(ts_packet: bytes) -> bytes:
+    if len(ts_packet) != TS_PACKET_SIZE:
         raise ValueError("Invalid TS packet size")
 
-    adaptation_field_control = (ts_record[3] >> 4) & 0b11
+    adaptation_field_control = (ts_packet[3] >> 4) & 0b11
 
     if adaptation_field_control in {2, 3}:
-        adaptation_field_length = ts_record[4]
-        if adaptation_field_length == 0 or len(ts_record) <= 5:
-            return ts_record
+        adaptation_field_length = ts_packet[4]
+        if adaptation_field_length == 0 or len(ts_packet) <= 5:
+            return ts_packet
 
-        modified = bytearray(ts_record)
+        modified = bytearray(ts_packet)
         modified[5] |= 0b10000000  # Set discontinuity_indicator
         return bytes(modified)
 
-    if force and adaptation_field_control == 1:
-        modified = bytearray(ts_record)
-        modified[3] = (
-            modified[3] & 0b11001111
-        ) | 0b00100000  # Set adaptation field control to 3
-        modified.insert(4, 1)  # adaptation_field_length = 1
-        modified.insert(5, 0x80)  # flags with discontinuity_indicator
-
-        return bytes(modified[:188])
-
-    return ts_record
+    return ts_packet
 
 
 def extract_frame_rate_from_segment_data(segment_data: bytes):
@@ -784,3 +1052,160 @@ def extract_frame_rate_from_segment_data(segment_data: bytes):
             os.unlink(temp_file_path)
         except OSError:
             pass
+
+
+def extract_resolution_from_segment_data(segment_data: bytes):
+    """
+    Extract video resolution (width, height) from TS segment data by parsing the first H.264 SPS NAL unit.
+    Returns (width, height) as integers, or (None, None) if not found.
+    """
+    video_pid = find_video_pid_in_segment(segment_data)
+    if video_pid is None:
+        return None, None
+
+    # Helper to get payload from TS packet
+    def get_payload(packet):
+        adaptation = (packet[3] >> 4) & 0x3
+        offset = 4
+        if adaptation in {2, 3}:
+            offset += 1 + packet[4]
+        return packet[offset:]
+
+    # Collect PES payloads for video PID
+    pes_buffer = bytearray()
+    for i in range(0, len(segment_data), TS_PACKET_SIZE):
+        pkt = segment_data[i:i + TS_PACKET_SIZE]
+        if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
+            continue
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid != video_pid:
+            continue
+        payload = get_payload(pkt)
+        pes_buffer.extend(payload)
+        # Search for SPS NAL unit (type 7)
+        i2 = 0
+        while i2 < len(pes_buffer) - 4:
+            if pes_buffer[i2:i2 + 3] == b'\x00\x00\x01':
+                nal_type = pes_buffer[i2 + 3] & 0x1F
+                if nal_type == 7:
+                    sps_start = i2 + 4
+                    sps_end = sps_start
+                    # Find end of NAL (next start code)
+                    for j in range(sps_start, len(pes_buffer) - 3):
+                        if pes_buffer[j:j + 3] == b'\x00\x00\x01':
+                            sps_end = j
+                            break
+                    else:
+                        sps_end = len(pes_buffer)
+                    sps_bytes = pes_buffer[sps_start:sps_end]
+                    # Parse SPS for width/height
+                    return parse_h264_sps_resolution(sps_bytes)
+            i2 += 1
+    return None, None
+
+
+def parse_h264_sps_resolution(sps_bytes: bytes):
+    """
+    Parse H.264 SPS bytes to extract width and height.
+    Returns (width, height) or (None, None) if parsing fails.
+    """
+    # Bitstream reader
+    class BitReader:
+        def __init__(self, data):
+            self.data = data
+            self.pos = 0
+            self.bit = 0
+
+        def read_bits(self, n):
+            val = 0
+            for _ in range(n):
+                if self.pos >= len(self.data):
+                    return None
+                val <<= 1
+                val |= (self.data[self.pos] >> (7 - self.bit)) & 1
+                self.bit += 1
+                if self.bit == 8:
+                    self.bit = 0
+                    self.pos += 1
+            return val
+
+        def read_bit(self):
+            return self.read_bits(1)
+
+        def read_ue(self):
+            zeros = 0
+            while True:
+                b = self.read_bit()
+                if b is None:
+                    return None
+                if b == 0:
+                    zeros += 1
+                else:
+                    break
+            val = 1 << zeros
+            val -= 1
+            if zeros:
+                val += self.read_bits(zeros)
+            return val
+
+        def read_se(self):
+            ue = self.read_ue()
+            if ue is None:
+                return None
+            if ue % 2 == 0:
+                return -(ue // 2)
+            return (ue + 1) // 2
+
+    br = BitReader(sps_bytes)
+    try:
+        br.read_bits(8)  # profile_idc
+        br.read_bits(8)  # constraint flags + level_idc
+        br.read_ue()     # seq_parameter_set_id
+        profile_idc = sps_bytes[0]
+        if profile_idc in {100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134}:
+            chroma_format_idc = br.read_ue()
+            if chroma_format_idc == 3:
+                br.read_bit()  # separate_colour_plane_flag
+            br.read_ue()   # bit_depth_luma_minus8
+            br.read_ue()   # bit_depth_chroma_minus8
+            br.read_bit()  # qpprime_y_zero_transform_bypass_flag
+            seq_scaling_matrix_present_flag = br.read_bit()
+            if seq_scaling_matrix_present_flag:
+                for _i in range(8 if chroma_format_idc == 3 else 12):
+                    if br.read_bit():
+                        # skip scaling list
+                        pass
+        br.read_ue()  # log2_max_frame_num_minus4
+        pic_order_cnt_type = br.read_ue()
+        if pic_order_cnt_type == 0:
+            br.read_ue()  # log2_max_pic_order_cnt_lsb_minus4
+        elif pic_order_cnt_type == 1:
+            br.read_bit()  # delta_pic_order_always_zero_flag
+            br.read_se()   # offset_for_non_ref_pic
+            br.read_se()   # offset_for_top_to_bottom_field
+            num_ref_frames_in_pic_order_cnt_cycle = br.read_ue()
+            for _ in range(num_ref_frames_in_pic_order_cnt_cycle):
+                br.read_se()
+        br.read_ue()   # max_num_ref_frames
+        br.read_bit()  # gaps_in_frame_num_value_allowed_flag
+        pic_width_in_mbs_minus1 = br.read_ue()
+        pic_height_in_map_units_minus1 = br.read_ue()
+        frame_mbs_only_flag = br.read_bit()
+        if not frame_mbs_only_flag:
+            br.read_bit()  # mb_adaptive_frame_field_flag
+        br.read_bit()      # direct_8x8_inference_flag
+        frame_cropping_flag = br.read_bit()
+        crop_left = crop_right = crop_top = crop_bottom = 0
+        if frame_cropping_flag:
+            crop_left = br.read_ue()
+            crop_right = br.read_ue()
+            crop_top = br.read_ue()
+            crop_bottom = br.read_ue()
+        width = ((pic_width_in_mbs_minus1 + 1) * 16) - (crop_left + crop_right) * 2
+        height = ((pic_height_in_map_units_minus1 + 1) * 16)
+        if not frame_mbs_only_flag:
+            height *= 2
+        height -= (crop_top + crop_bottom) * 2
+        return width, height
+    except Exception:
+        return None, None

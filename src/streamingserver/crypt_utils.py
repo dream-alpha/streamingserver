@@ -41,7 +41,7 @@ def download_encryption_key(session, key_url):
     """Download the encryption key from the given URL"""
     try:
         # print(f"🔑 Downloading encryption key from: {key_url}")
-        response = session.get(key_url, timeout=10)
+        response = session.get(key_url, allow_redirects=True, timeout=10)
         response.raise_for_status()
 
         key_data = response.content
