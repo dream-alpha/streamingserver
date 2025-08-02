@@ -5,6 +5,7 @@ Downloads, decrypts segments segment-by-segment and stores them in <rec_dir>/plu
 """
 
 import os
+import re
 import sys
 import time
 import threading
@@ -15,7 +16,7 @@ import requests
 from socket_server import RecorderCommandHandler, RecorderSocketServer
 from hls_playlist_utils import get_master_playlist, get_playlist, different_uris
 from crypt_utils import decrypt_segment, get_encryption_info
-from ts_utils import shift_segment, read_pts_from_segment, is_valid_ts_segment, set_discontinuity_segment, update_continuity_counters, find_pat_pmt_in_segment
+from ts_utils import shift_segment, read_pts_from_segment, is_valid_ts_segment, set_discontinuity_segment, update_continuity_counters, find_pat_pmt_in_segment, get_pcr_diff
 from hls_playlist import HLSPlaylistProcessor
 from debug import get_logger
 
@@ -28,10 +29,10 @@ class HLS_Recorder:
     def __init__(self):
         self.is_running = False
         self._stop_event = threading.Event()
-        self.channel = ""
+        self.channel_uri = ""
         self.server = None
 
-        self.playlist_processor = HLSPlaylistProcessor()
+        self.playlist_processor = None
         # Session for HTTP requests
         self.session = requests.Session()
         self.session.headers.update({
@@ -50,7 +51,7 @@ class HLS_Recorder:
         while attempt < max_retries:
             try:
                 logger.debug(f"🔽 Downloading segment {segment_sequence}: {os.path.basename(segment_url)} (attempt {attempt + 1})")
-                response = self.session.get(segment_url, timeout=timeout)
+                response = self.session.get(segment_url, allow_redirects=True, timeout=timeout)
                 response.raise_for_status()
                 segment_data = response.content
                 # Decrypt if necessary (use playlist-provided key/iv/method)
@@ -69,7 +70,7 @@ class HLS_Recorder:
         return None
 
     def append_to_ts(self, rec_file, segment_data, current_uri, segment_index):
-        """Append segment data to the current file, with global timestamp normalization for all segments (including fillers)"""
+        """Append segment data to the rec_file"""
         try:
             if not is_valid_ts_segment(segment_data):
                 logger.debug(f"✗ Invalid TS segment data for {current_uri}")
@@ -82,11 +83,9 @@ class HLS_Recorder:
             logger.debug("=" * 70)
             logger.debug(f"✓ Appended segment {segment_index}, {uri_name} to {rec_file} {file_size:.2f} MB")
             logger.debug("=" * 70)
-            return True
 
         except Exception as e:
             logger.debug(f"❌ Error appending to output file: {e}")
-            return False
 
     def record_stream(self, channel_uri, rec_file):
         """Main recording"""
@@ -102,6 +101,9 @@ class HLS_Recorder:
         previous_pts = 0
         pat_pmt_seen = False
         packet_index = -1
+        offset = 0
+        pcr_diff = None
+        current_pcr = 0
 
         # Track real playback time vs stream time
         continuous_pts = 0  # Continuous timeline for playback (never goes backwards)
@@ -125,7 +127,7 @@ class HLS_Recorder:
                     failed_playlist_count += 1
                     if failed_playlist_count >= max_failed_playlists:
                         logger.debug("❌ Too many failed playlist fetches. Aborting...")
-                        self.server.broadcast({"command": "stop", "args": ["error", self.channel, rec_file]})
+                        self.server.broadcast({"command": "stop", "args": ["error", self.channel_uri, rec_file]})
                         break
                     time.sleep(1)
                     continue
@@ -153,7 +155,7 @@ class HLS_Recorder:
                     logger.debug("⏳ No new segments found, waiting for next playlist update...")
                     if empty_playlist_count >= max_empty_playlists:
                         logger.debug("❌ Playlist has been empty for too long. Aborting...")
-                        self.server.broadcast({"command": "stop", "args": ["empty", self.channel, rec_file]})
+                        self.server.broadcast({"command": "stop", "args": ["empty", self.channel_uri, rec_file]})
                         break
                     time.sleep(0.5)
                     continue
@@ -184,15 +186,22 @@ class HLS_Recorder:
                             continue
                     pat_pmt_seen = True
 
-                    # Find video PID in segment
+                    # Find PTS in segment
                     current_pts, _ = read_pts_from_segment(segment_data)
                     if current_pts is None:
                         raise ValueError(f"No PTS found in segment {segment_index}")
 
-                    continuous_pts += previous_duration
-                    offset = continuous_pts - current_pts
+                    if segment_index == 0:
+                        current_pcr, pcr_diff = get_pcr_diff(segment_data)
+                        logger.debug(f"PCR diff for segment {segment_index}: {pcr_diff}, current PCR: {current_pcr}")
+                        continuous_pts = current_pts  # Start continuous PTS from first segment
+                        offset = 0
+                    else:
+                        continuous_pts += previous_duration
+                        offset = continuous_pts - current_pts
                     segment_data = shift_segment(segment_data, offset)
-                    logger.debug(f"### Previous PTS: {previous_pts}, Previous duration: {previous_duration}, Current PTS: {current_pts}, Continuous PTS: {continuous_pts}, Offset: {offset}")
+
+                    logger.debug(f"### Timestamps: {previous_pts}, Previous duration: {previous_duration}, Current PTS: {current_pts}, Continuous PTS: {continuous_pts}, Offset: {offset}")
 
                     # update cc counters for this segment
                     segment_data, cc_map = update_continuity_counters(segment_data, cc_map)
@@ -201,15 +210,15 @@ class HLS_Recorder:
                     if previous_uri and different_uris(previous_uri, current_uri):
                         logger.debug(f"Changing URI from: {previous_uri}")
                         logger.debug(f"Changing URI to:   {current_uri}")
-                        segment_data = set_discontinuity_segment(segment_data, force=True)
+                        segment_data = set_discontinuity_segment(segment_data)
 
                     # ready to append segment data to file
                     self.append_to_ts(rec_file, segment_data, current_uri, segment_index)
 
-                    if segment_index == 3:
+                    if segment_index == 2:
                         # send recording start message to client
                         if hasattr(self, 'server'):
-                            self.server.broadcast({"command": "start", "args": [self.channel, rec_file]})
+                            self.server.broadcast({"command": "start", "args": [self.channel_uri, rec_file]})
 
                     segment_index += 1
                     previous_uri = current_uri
@@ -221,18 +230,30 @@ class HLS_Recorder:
             return True
         except Exception as e:
             logger.debug(f"❌ Recording error: {e}")
-            self.server.broadcast({"command": "stop", "args": ["error", self.channel, rec_file]})
+            self.server.broadcast({"command": "stop", "args": ["error", self.channel_uri, rec_file]})
             traceback.print_exc()
             return False
         finally:
             self.is_running = False
             logger.debug("✓ Recording stopped")
+        return True
 
-    def start(self, channel, rec_file):
+    def start(self, channel_uri, rec_file):
         """Start the recording process"""
+        logger.info("#" * 70)
+        logger.info(f"Starting HLS recording for channel: {channel_uri}")
+        logger.info("#" * 70)
         self._stop_event.clear()
-        self.channel = channel
-        channel_uri = f"http://stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{channel}/master.m3u8?deviceType=unknown&deviceMake=unknown&deviceModel=unknown&deviceVersion=unknown&appVersion=unknown&deviceLat=90&deviceLon=0&deviceDNT=TARGETOPT&deviceId=PSID&advertisingId=PSID&us_privacy=1YNY&profileLimit=&profileFloor=&embedPartner="
+        self.channel_uri = channel_uri
+        # Extract channel_id from channel_uri using regex
+        match = re.search(r"/channel/([^/]+)/", channel_uri)
+        if match:
+            self.channel_id = match.group(1)
+            logger.debug(f"Extracted channel_id: {self.channel_id}")
+            channel_uri = f"http://stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{self.channel_id}/master.m3u8?deviceType=unknown&deviceMake=unknown&deviceModel=unknown&deviceVersion=unknown&appVersion=unknown&deviceLat=90&deviceLon=0&deviceDNT=TARGETOPT&deviceId=PSID&advertisingId=PSID&us_privacy=1YNY&profileLimit=&profileFloor=&embedPartner="
+        else:
+            logger.debug("Could not extract channel_id from channel_uri")
+
         logger.debug(f"📺 Using channel URI: {channel_uri}")
         if self.is_running:
             self.stop()
@@ -245,6 +266,7 @@ class HLS_Recorder:
             # os.remove(rec_file + '.ap')  # Remove associated .ap file
             logger.debug(f"🧹 Removed old file: {rec_file}")
 
+        self.playlist_processor = HLSPlaylistProcessor()
         threading.Thread(target=self.record_stream, args=(channel_uri, rec_file), daemon=True).start()
 
     def stop(self):

@@ -2,17 +2,23 @@ import re
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import m3u8
+from debug import get_logger
+
+logger = get_logger(__name__, "DEBUG")
 
 
 def get_master_playlist(session, url):
     """Get the master playlist URL and find the best quality stream"""
     try:
-        print(f"🔍 Getting master playlist from: {url}")
-        response = session.get(url, timeout=15)
+        logger.debug(f"🔍 Getting master playlist from: {url}")
+        response = session.get(url, allow_redirects=True, timeout=15)
         response.raise_for_status()
 
         # Parse the master playlist
         master_playlist = m3u8.loads(response.text)
+        logger.debug(f"📜 Master playlist fetched: {len(master_playlist.playlists)} streams found")
+        playlist_root = response.url  # Use the final URL after redirects
+        logger.debug(f"📍 Master playlist root URL: {playlist_root}")
 
         if master_playlist.playlists:
             # Sort by bandwidth and get the best quality
@@ -23,7 +29,9 @@ def get_master_playlist(session, url):
 
             # Get highest quality
             best_playlist = sorted_playlists[-1]
-            media_url = urljoin(url, best_playlist.uri)
+            logger.debug(f"✓ Best quality uri: {best_playlist.uri}")
+            media_url = urljoin(playlist_root, best_playlist.uri)
+            logger.debug(f"✓ Media playlist URL: {media_url}")
 
             bandwidth = best_playlist.stream_info.bandwidth if best_playlist.stream_info else 0
             resolution = best_playlist.stream_info.resolution if best_playlist.stream_info and best_playlist.stream_info.resolution else "unknown"

@@ -1,6 +1,6 @@
 Description: streamingserver
 Maintainer: dream-alpha
 Package: enigma2-plugin-ubuntu-streamingserver
-Version: 0.4.7
+Version: 0.5.0
 Architecture: all
 Depends: enigma2-plugin-systemplugins-ubuntucockpit

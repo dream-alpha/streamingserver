@@ -35,17 +35,12 @@ def parse_m3u8_entry(m3u8_text: str) -> list[dict]:
             # Parse display_name (after last comma)
             display_name = rest.split(',', 1)[-1].strip() if ',' in rest else ''
             # Next line is the URL
-            url = ''
-            channel_id = ''
+            uri = ''
             if i + 1 < len(lines):
-                url = lines[i + 1].strip()
-                # Extract channel slug from URL after '/channel/'
-                m = re.search(r'/channel/([^/]+)', url)
-                if m:
-                    channel_id = m.group(1)
+                uri = lines[i + 1].strip()
             if display_name.startswith('Pluto TV'):
                 display_name = display_name.replace('Pluto TV', '', 1).strip()
-            entry = {'duration': duration, 'display_name': display_name, 'channel_id': channel_id}
+            entry = {'duration': duration, 'display_name': display_name, 'channel_uri': uri}
             # Add known attribute keys explicitly
             for key in ("tvg-id", "tvg-logo", "group-title"):
                 if key in attrs:

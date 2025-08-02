@@ -1,7 +1,7 @@
 from collections import deque
 from debug import get_logger
 
-logger = get_logger(__name__, "INFO")
+logger = get_logger(__name__, "DEBUG")
 
 MAX_DEDUP_WINDOW_SIZE = 500  # Arbitrary limit for deduplication window size
 
@@ -378,8 +378,9 @@ class HLSPlaylistProcessor:
 
         # Parse the encryption key line
         # Format: #EXT-X-KEY:METHOD=AES-128,URI="...",IV=0x...
+        logger.debug(f"Parsing encryption key: {self.encryption_key}")
         if self.encryption_key.startswith("#EXT-X-KEY:"):
-            key_data = self.encryption_key[len("#EXT-X-KEY:") :]
+            key_data = self.encryption_key[len("#EXT-X-KEY:"):]
 
             # Simple attribute parsing (similar to parse_attributes)
             key_info = {}
