@@ -1,7 +1,7 @@
 from collections import deque
 from debug import get_logger
 
-logger = get_logger(__name__, "DEBUG")
+logger = get_logger(__file__)
 
 MAX_DEDUP_WINDOW_SIZE = 500  # Arbitrary limit for deduplication window size
 

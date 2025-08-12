@@ -1,3 +1,16 @@
+"""
+PlutoTV Playlist and EPG Generator
+
+This module provides functions to fetch channel and program data from the
+PlutoTV API, and then build an M3U8 playlist and an XMLTV EPG (Electronic
+Program Guide) file from that data.
+
+It includes functionality for:
+- Caching the API response to avoid excessive requests.
+- Filtering channels based on a user-defined favorites list.
+- Generating M3U8 playlists with updated, session-specific stream URLs.
+- Generating a comprehensive XMLTV EPG with detailed program information.
+"""
 import uuid
 import json
 import datetime
@@ -9,7 +22,7 @@ import requests
 from favorites import from_favorites
 from debug import get_logger
 
-logger = get_logger(__name__, "DEBUG")
+logger = get_logger(__file__)
 
 PLAYLIST_DIR = Path.home() / "plugins/streamingserver/data"
 CACHE_FILE = PLAYLIST_DIR / "cache.json"
@@ -19,7 +32,17 @@ PLAYLIST_FILE = PLAYLIST_DIR / "plutotv-playlist.m3u8"
 
 
 def fetch_json():
-    logger.info("Grabbing EPG...")
+    """
+    Fetches channel and EPG data from the PlutoTV API.
+
+    This function retrieves the next 48 hours of programming information.
+    It uses a local cache (`cache.json`) to avoid making repeated API calls
+    if the cached data is less than 30 minutes old.
+
+    Returns:
+        dict: A dictionary containing the JSON response from the PlutoTV API.
+    """
+    logger.debug("Grabbing EPG...")
 
     if CACHE_FILE.exists():
         age = (
@@ -39,7 +62,7 @@ def fetch_json():
         )
     )
     url = f"http://api.pluto.tv/v2/channels?start={start}&stop={stop}"
-    logger.debug(f"url: {url}")
+    logger.debug("url: %s", url)
     response = requests.get(url, timeout=5)
     response.raise_for_status()
     CACHE_FILE.write_text(response.text)
@@ -48,10 +71,23 @@ def fetch_json():
 
 
 def build_playlist(channels):
+    """
+    Builds an M3U8 playlist string from a list of channel data.
+
+    For each channel, this function generates a unique, session-specific stream
+    URL by adding or updating necessary query parameters. It then formats this
+    information into an `#EXTINF` line in the M3U8 format.
+
+    Args:
+        channels (list[dict]): A list of channel dictionaries from the PlutoTV API.
+
+    Returns:
+        str: A string containing the complete M3U8 playlist.
+    """
     m3u8 = "#EXTM3U\n"
     for channel in channels:
         if not channel.get("isStitched"):
-            logger.debug(f"Skipping 'fake' channel {channel['name']}.")
+            logger.debug("Skipping 'fake' channel %s.", channel['name'])
             continue
 
         stitched_url = channel["stitched"]["urls"][0]["url"]
@@ -93,11 +129,25 @@ def build_playlist(channels):
         name = channel["name"]
 
         m3u8 += f'#EXTINF:0 tvg-id="{slug}" tvg-logo="{logo}" group-title="{group}", {name}\n{updated_url}\n\n'
-        logger.debug(f"Adding {name} channel.")
+        logger.debug("Adding %s channel.", name)
     return m3u8
 
 
 def build_epg(channels):
+    """
+    Builds an XMLTV EPG from a list of channel data.
+
+    This function creates an XML structure compatible with the XMLTV format.
+    It generates `<channel>` elements for each channel and `<programme>` elements
+    for each scheduled program, including details like title, description,
+    start/stop times, and categories.
+
+    Args:
+        channels (list[dict]): A list of channel dictionaries from the PlutoTV API.
+
+    Returns:
+        xml.etree.ElementTree.ElementTree: An ElementTree object representing the EPG.
+    """
     tv = ET.Element("tv")
 
     for channel in channels:
@@ -151,7 +201,6 @@ def build_epg(channels):
 
         chan_elem = ET.SubElement(tv, "channel", {"id": channel["slug"]})
         ET.SubElement(chan_elem, "display-name").text = channel["name"]
-        # Fix: Convert the number to string
         ET.SubElement(chan_elem, "display-name").text = str(channel["number"])
         ET.SubElement(chan_elem, "desc").text = channel["summary"]
         ET.SubElement(chan_elem, "icon", {"src": channel["colorLogoPNG"]["path"]})
@@ -160,6 +209,23 @@ def build_epg(channels):
 
 
 def create_playlist_and_epg():
+    """
+    Main function to generate and save the PlutoTV playlist and EPG.
+
+    This function orchestrates the process:
+    1. Checks if the playlist and EPG files are already up-to-date for the day.
+    2. Fetches the latest channel data from the PlutoTV API.
+    3. Filters the channels based on the user's favorites file.
+    4. Builds the M3U8 playlist and saves it.
+    5. Builds the XMLTV EPG and saves it.
+    """
+    # Check if the playlist file exists and if it's from today
+    if PLAYLIST_FILE.exists():
+        file_mod_time = datetime.datetime.fromtimestamp(PLAYLIST_FILE.stat().st_mtime).date()
+        if file_mod_time == datetime.date.today():
+            logger.info("Playlist file %s is already up to date for today.", PLAYLIST_FILE)
+            return
+
     channels = fetch_json()
 
     # Filter channels using favorites
@@ -169,16 +235,15 @@ def create_playlist_and_epg():
         favorites_filter.print_summary()
     else:
         logger.debug(
-            f"No favorites specified ({FAVORITES_PATH}), loading all channels."
+            "No favorites specified (%s), loading all channels.", FAVORITES_PATH
         )
 
     # Generate and save M3U8
     m3u8 = build_playlist(channels)
     PLAYLIST_FILE.write_text(m3u8)
-    logger.debug(f"[SUCCESS] Wrote the M3U8 tuner to {PLAYLIST_FILE}!")
+    logger.info("Wrote the M3U8 playlist to %s!", PLAYLIST_FILE)
 
     # Generate and save XMLTV
     epg_tree = build_epg(channels)
-    # Fix: Convert Path to string
     epg_tree.write(str(EPG_FILE), encoding="utf-8", xml_declaration=True)
-    logger.debug(f"[SUCCESS] Wrote the EPG to {EPG_FILE}!")
+    logger.info("Wrote the EPG to %s!", EPG_FILE)

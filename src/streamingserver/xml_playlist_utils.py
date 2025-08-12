@@ -1,4 +1,7 @@
 import xml.etree.ElementTree as ET
+from debug import get_logger
+
+logger = get_logger(__file__)
 
 
 def get_playlist(xml_file):
@@ -26,7 +29,7 @@ def get_playlist(xml_file):
             })
 
     except Exception as e:
-        print(f"❌ Error reading XML file {xml_file}: {e}")
+        logger.debug("❌ Error reading XML file %s: %s", xml_file, e)
         return []
     # Sort channels by display_name (case-insensitive, None last)
     channels.sort(key=lambda c: (c['display_name'] is None, (c['display_name'] or '').lower()))

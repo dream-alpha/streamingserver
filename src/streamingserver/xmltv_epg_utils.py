@@ -3,7 +3,7 @@ import datetime
 import time
 from debug import get_logger
 
-logger = get_logger(__name__, "DEBUG")
+logger = get_logger(__file__)
 
 
 def extract_epg_for_channel(xmltv_file_path, channel_id):
@@ -19,7 +19,7 @@ def extract_epg_for_channel(xmltv_file_path, channel_id):
     """
     try:
         # Parse the XML file
-        logger.info(f"Parsing XMLTV file: {xmltv_file_path}")
+        logger.info("Parsing XMLTV file: %s", xmltv_file_path)
         tree = ET.parse(xmltv_file_path)
         root = tree.getroot()
 
@@ -80,11 +80,11 @@ def extract_epg_for_channel(xmltv_file_path, channel_id):
         # Sort programs by start time
         programs.sort(key=lambda x: x["start_time"])
 
-        logger.info(f"Found {len(programs)} programs for channel {channel_id}")
+        logger.info("Found %s programs for channel %s", len(programs), channel_id)
         return {"channel_info": channel_info, "programs": programs}
 
     except Exception as e:
-        logger.error(f"Error extracting EPG data: {str(e)}")
+        logger.error("Error extracting EPG data: %s", str(e))
         return {"channel_info": {}, "programs": []}
 
 
@@ -118,7 +118,7 @@ def parse_xmltv_time(time_str):
         return int(dt.timestamp())
 
     except Exception as e:
-        logger.error(f"Error parsing XMLTV time '{time_str}': {str(e)}")
+        logger.error("Error parsing XMLTV time '%s': %s", time_str, str(e))
         return 0
 
 

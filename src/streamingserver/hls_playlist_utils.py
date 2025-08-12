@@ -1,24 +1,47 @@
+"""
+HLS Playlist Utilities
+
+This module provides helper functions for fetching and parsing HLS (HTTP Live
+Streaming) playlists. It includes functionality to retrieve a master playlist,
+select the best quality stream, fetch media playlists, and parse HLS attribute
+strings. It also contains a utility to compare URIs to detect changes in the
+stream's source.
+"""
 import re
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import m3u8
 from debug import get_logger
 
-logger = get_logger(__name__, "DEBUG")
+logger = get_logger(__file__)
 
 
 def get_master_playlist(session, url):
-    """Get the master playlist URL and find the best quality stream"""
+    """
+    Fetches a master HLS playlist and returns the URL of the highest quality stream.
+
+    If the provided URL points to a media playlist directly, it returns the same URL.
+    Otherwise, it parses the master playlist, sorts the available streams by
+    bandwidth, and selects the one with the highest bandwidth.
+
+    Args:
+        session (requests.Session): A requests.Session object used for making HTTP requests.
+        url (str): The URL of the master HLS playlist.
+
+    Returns:
+        str | None: The URL of the highest quality media playlist, or None if
+                    an error occurs.
+    """
     try:
-        logger.debug(f"🔍 Getting master playlist from: {url}")
+        logger.debug("🔍 Getting master playlist from: %s", url)
         response = session.get(url, allow_redirects=True, timeout=15)
         response.raise_for_status()
 
         # Parse the master playlist
         master_playlist = m3u8.loads(response.text)
-        logger.debug(f"📜 Master playlist fetched: {len(master_playlist.playlists)} streams found")
+        logger.debug("📜 Master playlist fetched: %s streams found", len(master_playlist.playlists))
         playlist_root = response.url  # Use the final URL after redirects
-        logger.debug(f"📍 Master playlist root URL: {playlist_root}")
+        logger.debug("📍 Master playlist root URL: %s", playlist_root)
 
         if master_playlist.playlists:
             # Sort by bandwidth and get the best quality
@@ -29,45 +52,63 @@ def get_master_playlist(session, url):
 
             # Get highest quality
             best_playlist = sorted_playlists[-1]
-            logger.debug(f"✓ Best quality uri: {best_playlist.uri}")
+            logger.debug("✓ Best quality uri: %s", best_playlist.uri)
             media_url = urljoin(playlist_root, best_playlist.uri)
-            logger.debug(f"✓ Media playlist URL: {media_url}")
+            logger.debug("✓ Media playlist URL: %s", media_url)
 
             bandwidth = best_playlist.stream_info.bandwidth if best_playlist.stream_info else 0
             resolution = best_playlist.stream_info.resolution if best_playlist.stream_info and best_playlist.stream_info.resolution else "unknown"
 
-            print(f"✓ Selected stream: {bandwidth // 1000}kbps, {resolution} resolution")
-            print(f"✓ Media playlist URL: {media_url}")
+            logger.debug("✓ Selected stream: %skbps, %s resolution", bandwidth // 1000, resolution)
+            logger.debug("✓ Media playlist URL: %s", media_url)
 
             return media_url
         # Already a media playlist
-        print(f"✓ Direct media playlist URL: {url}")
+        logger.debug("✓ Direct media playlist URL: %s", url)
         return url
 
     except Exception as e:
-        print(f"❌ Error getting master playlist: {e}")
+        logger.debug("❌ Error getting master playlist: %s", e)
         return None
 
 
 def get_playlist(session, playlist_url):
-    """Get segments from a media playlist"""
+    """
+    Fetches the content of an HLS media playlist.
+
+    Args:
+        session (requests.Session): A requests.Session object for HTTP requests.
+        playlist_url (str): The URL of the media playlist to fetch.
+
+    Returns:
+        str | None: The text content of the playlist, or None if the request fails.
+    """
     try:
         response = session.get(playlist_url, timeout=30)
         if response.status_code != 200:
-            print(f"⚠ Failed to fetch playlist: HTTP {response.status_code}")
+            logger.debug("⚠ Failed to fetch playlist: HTTP %s", response.status_code)
             return None
-        print(f"📜 Fetched playlist ({len(response.text)} bytes)")
+        logger.debug("📜 Fetched playlist (%s bytes)", len(response.text))
     except Exception as e:
-        print(f"❌ Error fetching playlist: {e}")
+        logger.debug("❌ Error fetching playlist: %s", e)
         return None
     return response.text
 
 
 def parse_attributes(attr_str):
     """
-    Parses attribute string of form: key1=value1,key2="value2",...
+    Parses a string of HLS attributes into a dictionary.
 
-    Returns dict of key:value pairs with quotes stripped.
+    The attribute string is expected to be in the format:
+    `KEY1=VALUE1,KEY2="QUOTED VALUE",KEY3=VALUE3`
+
+    This function handles both quoted and unquoted values.
+
+    Args:
+        attr_str (str): The attribute string to parse.
+
+    Returns:
+        dict: A dictionary of the parsed key-value pairs.
     """
     attrs = {}
     pattern = re.compile(r'''([A-Z0-9\-]+)=(".*?"|[^",]*)''')
@@ -81,8 +122,18 @@ def parse_attributes(attr_str):
 
 def different_uris(uri1, uri2):
     """
-    Compare two URIs and return True if they are different.
-    URIs are different if hosts are different OR if hosts are same but first directory components are different.
+    Compares two URIs to determine if they point to different stream sources.
+
+    URIs are considered different if their hostnames are different, or if their
+    hostnames are the same but their first path components are different. This
+    helps in detecting when a stream switches to a different CDN or server.
+
+    Args:
+        uri1 (str): The first URI to compare.
+        uri2 (str): The second URI to compare.
+
+    Returns:
+        bool: True if the URIs are considered different, False otherwise.
     """
     if not uri1 or not uri2:
         return True  # If either is None, consider them different

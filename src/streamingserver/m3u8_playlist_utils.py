@@ -1,9 +1,24 @@
+"""
+M3U8 Playlist Parsing Utilities
+
+This module provides functions for reading and parsing M3U8 playlist files.
+It is designed to extract structured information from standard M3U8 `#EXTINF`
+entries, including duration, display name, attributes (like `tvg-id`, `tvg-logo`),
+and the associated stream URL.
+"""
 import re
 
 
 def get_playlist(file_path: str) -> list[dict]:
     """
-    Read an m3u8 playlist file and return a list of entries with duration, display name, channel, and URL.
+    Reads an M3U8 playlist file and parses its entries.
+
+    Args:
+        file_path (str): The path to the M3U8 file.
+
+    Returns:
+        list[dict]: A list of dictionaries, where each dictionary represents
+                    a channel entry from the playlist.
     """
     with open(file_path, 'r', encoding='utf-8') as f:
         m3u8_text = f.read()
@@ -12,8 +27,19 @@ def get_playlist(file_path: str) -> list[dict]:
 
 def parse_m3u8_entry(m3u8_text: str) -> list[dict]:
     """
-    Parse EXTINF entries from an m3u8 playlist with attributes and URL.
-    Returns a list of dicts with duration, attributes, name, and url.
+    Parses #EXTINF entries from an M3U8 playlist string.
+
+    This function extracts information from `#EXTINF` lines, including duration,
+    key-value attributes (e.g., `tvg-id`), the display name, and the URL on the
+    following line. The resulting list of entries is sorted by display name.
+
+    Args:
+        m3u8_text (str): The full text content of the M3U8 playlist.
+
+    Returns:
+        list[dict]: A sorted list of dictionaries, where each dictionary
+                    represents a channel and contains keys like 'duration',
+                    'display_name', 'channel_uri', 'tvg-id', etc.
     """
     lines = m3u8_text.strip().splitlines()
     result = []

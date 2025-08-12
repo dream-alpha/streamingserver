@@ -4,6 +4,9 @@ TS Timestamp Analyzer
 Analyzes a recorded TS file and prints PTS, DTS, PCR values and their differences between packets and segments.
 """
 import sys
+from debug import get_logger
+
+logger = get_logger(__file__)
 
 
 def parse_ts_packets(ts_data):
@@ -71,7 +74,7 @@ def analyze_ts_file(ts_path):
         ts_data = f.read()
     packets = parse_ts_packets(ts_data)
     last_pts = last_dts = last_pcr = None
-    print("Idx\tPID\tPTS\tDTS\tPCR\tPTS_diff\tDTS_diff\tPCR_diff")
+    logger.debug("Idx\tPID\tPTS\tDTS\tPCR\tPTS_diff\tDTS_diff\tPCR_diff")
     for idx, packet in enumerate(packets):
         pid = ((packet[1] & 0x1F) << 8) | packet[2]
         pts, dts = get_pts_dts(packet)
@@ -92,11 +95,11 @@ def analyze_ts_file(ts_path):
             last_pcr = pcr
         # Only print if at least one of PTS, DTS, PCR is present
         if pts is not None or dts is not None or pcr is not None:
-            print(f"{idx}\t{pid}\t{pts}\t{dts}\t{pcr}\t{pts_diff}\t{dts_diff}\t{pcr_diff}")
+            logger.debug(f"{idx}\t{pid}\t{pts}\t{dts}\t{pcr}\t{pts_diff}\t{dts_diff}\t{pcr_diff}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 test.py <ts_file>")
+        logger.debug("Usage: python3 test.py <ts_file>")
         sys.exit(1)
     analyze_ts_file(sys.argv[1])

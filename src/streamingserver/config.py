@@ -1,3 +1,22 @@
+"""
+Configuration Management for the Streaming Server
+
+This module provides a flexible configuration management system that loads settings
+from a text file (`settings.txt`). It parses key-value pairs, organizes them into
+a hierarchical namespace, and automatically casts values to their appropriate
+Python types (e.g., int, bool, list, str).
+
+The configuration is accessed through a singleton `config` object.
+
+Key features:
+- Hierarchical configuration using dot notation (e.g., `config.plugins.streamingserver.port`).
+- Automatic type casting for common Python literals.
+- A `ValueWrapper` class to access the raw value via the `.value` attribute.
+- A fallback mechanism that returns a special `_MissingConfigValue` object
+  for undefined settings, preventing `AttributeError` exceptions.
+- Automatic loading of a default `settings.txt` file if present.
+"""
+
 import ast
 import os
 
@@ -6,6 +25,13 @@ DEFAULT_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "settings.txt")
 
 
 class ValueWrapper:
+    """
+    A wrapper class for configuration values.
+
+    This class holds the actual configuration value and provides methods to
+    access it as different types (e.g., int, float, bool). The primary way
+    to access the value is through the `.value` attribute.
+    """
     def __init__(self, value):
         self.value = value
 
@@ -26,7 +52,14 @@ class ValueWrapper:
 
 
 class _MissingConfigValue:
-    """Dummy object that always returns None for .value and itself for any attribute."""
+    """
+    A dummy object representing a missing configuration value.
+
+    This class is used as a fallback for undefined settings. It always returns
+    `None` for its `.value` attribute and returns itself for any other attribute
+    access, allowing for safe, chainable lookups on non-existent paths.
+    It evaluates to `False` in a boolean context.
+    """
     value = None
 
     def __getattr__(self, key):
@@ -40,6 +73,13 @@ class _MissingConfigValue:
 
 
 class ConfigNamespace:
+    """
+    A namespace for organizing hierarchical configuration settings.
+
+    This class acts like a dictionary but allows attribute-style access
+    (e.g., `namespace.key`). If a key is not found, it returns a
+    `_MissingConfigValue` instance to prevent errors.
+    """
     def __init__(self):
         self.__dict__ = {}
 
@@ -65,11 +105,26 @@ class ConfigNamespace:
 
 
 class _Config(ConfigNamespace):
+    """
+    The main configuration class that handles loading and parsing.
+
+    This class inherits from `ConfigNamespace` and adds the functionality
+    to load settings from a file. It is intended to be used as a singleton.
+    """
     def __init__(self):
         super().__init__()
         self._loaded_file = None
 
     def load_file(self, filename):
+        """
+        Load and parse a configuration file.
+
+        Args:
+            filename (str): The path to the configuration file.
+
+        Raises:
+            FileNotFoundError: If the specified file does not exist.
+        """
         if not os.path.exists(filename):
             raise FileNotFoundError(f"Config file not found: {filename}")
         self._loaded_file = filename
@@ -83,7 +138,7 @@ class _Config(ConfigNamespace):
                     print(f"Skipping line {lineno}: invalid format")
                     continue
 
-                key_path, value = {str.strip, line.split('=', 1)}
+                key_path, value = [s.strip() for s in line.split('=', 1)]
                 if key_path.startswith("config."):
                     key_path = key_path[len("config."):]
 
@@ -104,6 +159,19 @@ class _Config(ConfigNamespace):
 
     @staticmethod
     def _auto_cast(value):
+        """
+        Automatically cast a string value to a Python literal.
+
+        Tries to evaluate the string as a Python literal (e.g., number, boolean,
+        list). If that fails, it checks for a comma-separated list, and finally
+        returns the original string.
+
+        Args:
+            value (str): The string value to cast.
+
+        Returns:
+            The casted value.
+        """
         value = value.strip()
         try:
             return ast.literal_eval(value)
@@ -114,10 +182,10 @@ class _Config(ConfigNamespace):
         return value
 
 
-# ✅ Singleton instance
+# Singleton instance of the configuration manager.
 config = _Config()
 
-# ✅ Automatically load `settings.txt` if it exists
+# Automatically load the default `settings.txt` file if it exists.
 if os.path.exists(DEFAULT_CONFIG_FILE):
     try:
         config.load_file(DEFAULT_CONFIG_FILE)

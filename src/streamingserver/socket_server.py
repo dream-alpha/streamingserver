@@ -1,12 +1,15 @@
 import json
 import socketserver
 from m3u8_playlist_utils import get_playlist
+from plutotv_utils import create_playlist_and_epg
+from debug import get_logger
+
+logger = get_logger(__file__)
 
 
-# --- Socket server for command control ---
 class RecorderCommandHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        print(f"Connection established with {self.client_address}")
+        logger.debug("Connection established with %s", self.client_address)
         # Register client socket
         if hasattr(self.server, 'clients'):
             self.server.clients.append(self.request)
@@ -14,14 +17,14 @@ class RecorderCommandHandler(socketserver.BaseRequestHandler):
             while True:
                 data = self.request.recv(4096)
                 if not data:
-                    print(f"Connection closed by client {self.client_address}")
+                    logger.debug("Connection closed by client %s", self.client_address)
                     # Unregister client socket
                     if hasattr(self.server, 'clients') and self.request in self.server.clients:
                         self.server.clients.remove(self.request)
                     break
                 try:
                     req = json.loads(data.strip().decode())
-                    print(f"socket server received: {req}")
+                    logger.debug("socket server received: %s", req)
                     cmd = req.get("command", "")
                     if cmd == "start":
                         args = req.get("args", [])
@@ -31,15 +34,16 @@ class RecorderCommandHandler(socketserver.BaseRequestHandler):
                     elif cmd == "stop":
                         self.server.recorder.stop()
                     elif cmd == "get_playlist":
+                        create_playlist_and_epg()
                         playlist = get_playlist("/root/plugins/streamingserver/data/plutotv-playlist.m3u8")
                         response = {"command": "get_playlist", "args": [playlist]}
                         self.request.sendall((json.dumps(response) + '\n').encode())
                     else:
-                        print(f"❌ Unknown command: {cmd}")
+                        logger.debug("❌ Unknown command: %s", cmd)
                 except Exception as e:
-                    print(f"❌ Error handling command: {e}")
+                    logger.debug("❌ Error handling command: %s", e)
         except Exception as e:
-            print(f"❌ Connection error: {e}")
+            logger.debug("❌ Connection error: %s", e)
 
 
 class RecorderSocketServer(socketserver.ThreadingTCPServer):
@@ -52,10 +56,10 @@ class RecorderSocketServer(socketserver.ThreadingTCPServer):
 
     def broadcast(self, message):
         # Broadcast message to all connected clients
-        print(f"broadcast: {message}")
+        logger.debug("broadcast: %s", message)
         data = (json.dumps(message) + '\n').encode()
         for client in self.clients:
             try:
                 client.sendall(data)
             except Exception as e:
-                print(f"Error sending to client: {e}")
+                logger.debug("Error sending to client: %s", e)

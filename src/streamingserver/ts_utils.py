@@ -1,18 +1,36 @@
+"""
+MPEG-TS (Transport Stream) Utilities
+
+This module provides a comprehensive set of low-level utilities for parsing,
+analyzing, and manipulating MPEG-TS packets and segments. It includes functions
+for reading and writing timestamps (PTS, DTS, PCR), finding and parsing PSI
+tables (PAT, PMT), identifying keyframes (IDRs), managing continuity counters,
+and validating the integrity of TS segments. These tools are fundamental for
+processing HLS streams, stitching segments, and ensuring stream compliance.
+"""
 import os
 import subprocess
 import json
 import tempfile
 from debug import get_logger
 
-logger = get_logger(__name__, "DEBUG")
+logger = get_logger(__file__)
 
 TS_PACKET_SIZE = 188
 
 
 def get_pcr_diff(segment_data: bytes):
     """
-    Return the difference between the first two PCR base values found in the segment.
-    Returns the diff as an integer (PCR2_base - PCR1_base), or None if fewer than 2 PCRs are found.
+    Calculates the difference between the first two PCRs in a segment.
+
+    This is useful for estimating the segment's duration or clock rate.
+
+    Args:
+        segment_data: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        A tuple containing (first_pcr_base, difference). Returns (None, None)
+        if fewer than two PCRs are found.
     """
     first_pcr = None
     second_pcr = None
@@ -36,8 +54,18 @@ def get_pcr_diff(segment_data: bytes):
 
 def find_video_pid_in_segment(segment_bytes: bytes) -> int:
     """
-    Find the video PID in a TS segment by parsing PAT and PMT tables.
-    Returns the PID of the first video stream found (H.264/H.265), or None if not found.
+    Finds the video PID in a TS segment by parsing PAT and PMT tables.
+
+    It first finds the Program Association Table (PAT) to get the PID of the
+    Program Map Table (PMT). Then, it parses the PMT to find the PID of the
+
+    first video stream (H.264/H.265).
+
+    Args:
+        segment_bytes: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        The PID of the first video stream found, or None if not found.
     """
     def read_ts_packets(data):
         for i in range(0, len(data), TS_PACKET_SIZE):
@@ -99,8 +127,14 @@ def find_video_pid_in_segment(segment_bytes: bytes) -> int:
 
 def find_pat_pmt_in_segment(segment_bytes: bytes):
     """
-    Find and return the first PAT and PMT TS packets and the index of the PAT packet in the segment.
-    Returns (pat_packet, pmt_packet, pat_index), or (None, None, -1) if not found.
+    Finds and returns the first PAT and PMT packets in a segment.
+
+    Args:
+        segment_bytes: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        A tuple containing (pat_packet, pmt_packet, pat_packet_index).
+        Returns (None, None, -1) if not found.
     """
     pat_pid = 0x0000
     pmt_pid = None
@@ -155,15 +189,18 @@ def find_pat_pmt_in_segment(segment_bytes: bytes):
 
 def find_gop_start_in_segment(segment_bytes: bytes):
     """
-    Find the first clean GOP (SPS+PPS+IDR) in an HLS .ts segment.
+    Finds the first clean Group of Pictures (GOP) start in a segment.
+
+    A clean GOP start is defined as a sequence of SPS, PPS, and IDR NAL units
+    in the video stream, which allows a decoder to start playback without
+    prior data.
 
     Args:
-        segment_bytes (bytes): Entire .ts segment as a bytes object.
+        segment_bytes: The raw bytes of the MPEG-TS segment.
 
     Returns:
-        (int, int, bytes, bytes) or (None, None, None, None):
-        Tuple of (GOP byte offset, video PID, PAT packet, PMT packet),
-        or all None if no clean GOP is found.
+        A tuple of (gop_packet_index, video_pid, pat_packet, pmt_packet),
+        or (-1, None, None, None) if no clean GOP is found.
     """
 
     def read_ts_packets(data):
@@ -250,9 +287,17 @@ def find_gop_start_in_segment(segment_bytes: bytes):
 
 def update_continuity_counters(segment: bytes, cc_map: dict) -> tuple[bytes, dict]:
     """
-    Incrementally update the continuity counter (CC) for all TS packets in a segment, per PID.
-    Input: cc_map (dict {pid: cc}), segment (bytes)
-    Returns: (modified_segment, updated_cc_map)
+    Incrementally updates the continuity counter (CC) for each PID in a segment.
+
+    This function ensures that the CC for each PID is continuous, which is
+    required for a compliant MPEG-TS stream.
+
+    Args:
+        segment: The raw bytes of the MPEG-TS segment.
+        cc_map: A dictionary mapping PIDs to their last known CC value.
+
+    Returns:
+        A tuple containing the modified segment bytes and the updated cc_map.
     """
     out = bytearray()
     cc_map = cc_map.copy() if cc_map else {}
@@ -262,7 +307,7 @@ def update_continuity_counters(segment: bytes, cc_map: dict) -> tuple[bytes, dic
             out.extend(pkt)
             continue
         pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-        cc = ((cc_map.get(pid, -1) + 1) & 0x0F)
+        cc = (cc_map.get(pid, -1) + 1) & 0x0F
         pkt[3] = (pkt[3] & 0xF0) | cc
         out.extend(pkt)
         cc_map[pid] = cc
@@ -271,9 +316,16 @@ def update_continuity_counters(segment: bytes, cc_map: dict) -> tuple[bytes, dic
 
 def read_continuity_counter(ts_packet: bytes) -> int:
     """
-    Extract the continuity counter (CC) from a 188-byte MPEG-TS packet.
-    Returns the 4-bit CC value as an integer (0-15).
-    Raises ValueError if the packet is not 188 bytes or does not start with 0x47.
+    Extracts the continuity counter (CC) from a single TS packet.
+
+    Args:
+        ts_packet: A 188-byte MPEG-TS packet.
+
+    Returns:
+        The 4-bit CC value as an integer (0-15).
+
+    Raises:
+        ValueError: If the packet is not a valid TS packet.
     """
     if len(ts_packet) != TS_PACKET_SIZE:
         raise ValueError("Invalid TS packet size")
@@ -282,35 +334,15 @@ def read_continuity_counter(ts_packet: bytes) -> int:
     return ts_packet[3] & 0x0F
 
 
-def make_discontinuity_packet(pid: int = 0x1FFF, cc_map: dict = None) -> tuple[bytes, dict]:
-    """
-    Create a single MPEG-TS packet (188 bytes) with only the discontinuity flag set in the adaptation field.
-    Uses and updates cc_map for the given PID. Returns (packet_bytes, updated_cc_map).
-    """
-    if cc_map is None:
-        cc_map = {}
-    cc = ((cc_map.get(pid, -1) + 1) & 0x0F)
-    packet = bytearray(188)
-    packet[0] = 0x47  # Sync byte
-    # Set PID
-    packet[1] = 0x40 | ((pid >> 8) & 0x1F)  # payload_unit_start_indicator=0, PID high bits
-    packet[2] = pid & 0xFF  # PID low bits
-    # Adaptation field only, no payload
-    packet[3] = 0x20 | (cc & 0x0F)  # adaptation_field_control=2
-    packet[4] = 1  # adaptation_field_length=1 (only flags byte)
-    packet[5] = 0x80  # discontinuity_indicator=1
-    # Stuffing bytes (0xFF) for rest of adaptation field (none needed here, since length=1)
-    for i in range(6, 188):
-        packet[i] = 0xFF
-    cc_map = cc_map.copy()
-    cc_map[pid] = cc
-    return bytes(packet), cc_map
-
-
 def segment_has_pat_pmt(segment_data: bytes) -> int:
     """
-    Check if the TS segment contains a valid PAT and PMT.
-    Returns the index of the TS packet containing the PMT, or -1 if not found.
+    Checks if a TS segment contains a valid PAT and PMT.
+
+    Args:
+        segment_data: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        A tuple of (pat_packet_index, pmt_packet_index), or (-1, -1) if not found.
     """
     # PAT PID is always 0x0000, PMT PID is found in PAT
     pat_idx = -1
@@ -357,8 +389,17 @@ def segment_has_pat_pmt(segment_data: bytes) -> int:
 
 def segment_has_keyframe(segment_data: bytes) -> int:
     """
-    Check if the TS segment contains a video keyframe (IDR) at or near the start.
-    Returns the packet index (0-based) if a keyframe is found in the first N packets, else -1.
+    Checks if a TS segment contains a video keyframe (IDR) near the start.
+
+    It scans the first few packets of the segment for a PES packet containing
+    an H.264 IDR frame (NAL unit type 5) or an H.265 IDR frame (NAL unit
+    type 19 or 20).
+
+    Args:
+        segment_data: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        The 0-based index of the packet containing the keyframe, or -1 if not found.
     """
     # MPEG-TS: Look for NAL unit type 5 (IDR) in H.264 or type 19/20 in H.265
     # Only check first 20 packets for speed
@@ -397,10 +438,23 @@ def segment_has_keyframe(segment_data: bytes) -> int:
     return -1
 
 
-def is_valid_ts_segment(segment_data):
-    """Check if segment_data is a valid MPEG-TS segment (sync and video PID)."""
+def is_valid_ts_segment(segment_data: bytes):
+    """
+    Performs a series of checks to validate if a segment is a valid MPEG-TS segment.
+
+    Checks for:
+    - A minimum number of TS sync bytes.
+    - A majority of packets belonging to a plausible video PID.
+    - The presence of at least one valid PTS/DTS timestamp in video packets.
+
+    Args:
+        segment_data (bytes): The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        True if the segment passes validation checks, False otherwise.
+    """
     if not segment_data or len(segment_data) < 188:
-        logger.debug(f"[TS_ANALYZE] Segment too short or empty: {len(segment_data)}")
+        logger.debug("[TS_ANALYZE] Segment too short or empty: %s", len(segment_data))
         return False
     sync_count = 0
     pid_counter = {}
@@ -419,14 +473,14 @@ def is_valid_ts_segment(segment_data):
     min_sync_packets = max(3, int(0.8 * total_packets))
     has_valid_sync = sync_count >= min_sync_packets
     if not has_valid_sync:
-        print(f"[TS_ANALYZE] Sync byte check failed: {sync_count}/{total_packets} valid packets (need >= {min_sync_packets})")
+        logger.debug("[TS_ANALYZE] Sync byte check failed: %s/%s valid packets (need >= %s)", sync_count, total_packets, min_sync_packets)
 
     # Find majority video PID
     video_pids = [pid for pid in pid_counter if pid == 256 or (0x100 <= pid <= 0x1FF)]
     video_pid_count = sum(pid_counter[pid] for pid in video_pids)
     majority_video_pid = video_pid_count >= int(0.5 * sync_count) and video_pid_count > 0
     if not majority_video_pid:
-        print(f"[TS_ANALYZE] Video PID check failed: {video_pid_count}/{sync_count} packets with video PID (need >= {int(0.5 * sync_count)})")
+        logger.debug("[TS_ANALYZE] Video PID check failed: %s/%s packets with video PID (need >= %s)", video_pid_count, sync_count, int(0.5 * sync_count))
 
     # Check for valid PTS/DTS in video packets
     pts_dts_valid_count = 0
@@ -447,91 +501,72 @@ def is_valid_ts_segment(segment_data):
     # MPEG-TS spec: only require at least one valid PTS/DTS in video packets
     has_valid_pts_dts = pts_dts_valid_count >= 1
     if not has_valid_pts_dts:
-        print(f"[TS_ANALYZE] PTS/DTS check failed: {pts_dts_valid_count}/{video_pid_count} video packets with valid PTS/DTS (need >= 1)")
+        logger.debug("[TS_ANALYZE] PTS/DTS check failed: %s/%s video packets with valid PTS/DTS (need >= 1)", pts_dts_valid_count, video_pid_count)
 
-    print(f"[TS_ANALYZE] Segment PIDs: {sorted(pid_counter.keys())}, video_pid_count={video_pid_count}, sync_count={sync_count}, pts_dts_valid_count={pts_dts_valid_count}")
+    logger.debug("[TS_ANALYZE] Segment PIDs: %s, video_pid_count=%s, sync_count=%s, pts_dts_valid_count=%s", sorted(pid_counter.keys()), video_pid_count, sync_count, pts_dts_valid_count)
     if corrupted_packets:
-        print("[TS_ANALYZE] Corrupted TS packets in segment:")
+        logger.debug("[TS_ANALYZE] Corrupted TS packets in segment:")
         for idx, pkt in corrupted_packets:
-            print(f"  Offset {idx}: {pkt.hex()}")
+            logger.debug("  Offset %s: %s", idx, pkt.hex())
 
     return has_valid_sync and majority_video_pid and has_valid_pts_dts
 
 
-def set_discontinuity_segment(segment):
-    """Set the discontinuity flag for all TS packets in a segment."""
-    if len(segment) < TS_PACKET_SIZE:
-        raise ValueError("Segment too small for TS packet")
-    out = bytearray()
-    # Find all elementary stream PIDs (video, audio, etc.) from PMT
-    pmt_pid = None
-    es_pids = set()
-    pat_pids = set([0x0000])
-    # Scan for PAT/PMT
-    for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
-        pkt = segment[i: i + TS_PACKET_SIZE]
-        if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
-            continue
-        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-        if pid == 0x0000:  # PAT
-            pointer_field = pkt[4]
-            pat_start = 5 + pointer_field
-            if pat_start + 8 < len(pkt) and pkt[pat_start] == 0x00:
-                section_length = ((pkt[pat_start + 1] & 0x0F) << 8) | pkt[pat_start + 2]
-                program_info_start = pat_start + 8
-                program_info_end = pat_start + 3 + section_length - 4
-                for j in range(program_info_start, program_info_end, 4):
-                    if j + 4 > len(pkt):
-                        break
-                    program_number = (pkt[j] << 8) | pkt[j + 1]
-                    if program_number == 0:
-                        continue
-                    pmt_pid_candidate = ((pkt[j + 2] & 0x1F) << 8) | pkt[j + 3]
-                    pmt_pid = pmt_pid_candidate
-                    break
-        if pmt_pid is not None:
-            break
-    # Now scan for elementary stream PIDs in PMT
-    if pmt_pid is not None:
-        for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
-            pkt = segment[i: i + TS_PACKET_SIZE]
-            if len(pkt) != TS_PACKET_SIZE or pkt[0] != 0x47:
-                continue
-            pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-            if pid == pmt_pid:
-                pointer_field = pkt[4]
-                pmt_start = 5 + pointer_field
-                if pmt_start < len(pkt) and pkt[pmt_start] == 0x02:
-                    section_length = ((pkt[pmt_start + 1] & 0x0F) << 8) | pkt[pmt_start + 2]
-                    program_info_length = ((pkt[pmt_start + 10] & 0x0F) << 8) | pkt[pmt_start + 11]
-                    idx = pmt_start + 12 + program_info_length
-                    section_end = pmt_start + 3 + section_length - 4
-                    while idx + 5 <= min(section_end, len(pkt)):
-                        _stream_type = pkt[idx]
-                        elementary_pid = ((pkt[idx + 1] & 0x1F) << 8) | pkt[idx + 2]
-                        es_info_length = ((pkt[idx + 3] & 0x0F) << 8) | pkt[idx + 4]
-                        es_pids.add(elementary_pid)
-                        idx += 5 + es_info_length
-                break
-    # Set discontinuity flag in all PAT, PMT, and elementary stream packets
-    for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
-        pkt = segment[i: i + TS_PACKET_SIZE]
-        if len(pkt) == TS_PACKET_SIZE and pkt[0] == 0x47:
-            pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
-            # Set for PAT, PMT, and all elementary stream PIDs
-            if pid in pat_pids or pid == pmt_pid or pid in es_pids:
-                pkt = set_discontinuity_flag(pkt)
-        out.extend(pkt)
-    # Append any trailing bytes (if segment is not a multiple of TS_PACKET_SIZE)
-    if len(segment) % TS_PACKET_SIZE:
-        out.extend(segment[len(out):])
-    return bytes(out)
+def set_discontinuity_segment(segment: bytes) -> bytes:
+    """
+    Sets the discontinuity indicator on the first possible packet in a segment.
+
+    According to the HLS specification, the discontinuity indicator flag should be
+    set on the first packet of each elementary stream after a discontinuity. A
+    simpler, common practice is to set it on the first packet of the segment
+    that has an adaptation field.
+
+    Args:
+        segment: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        The modified segment with the discontinuity flag set, or the original
+        segment if no suitable packet is found.
+    """
+    if not segment:
+        return segment
+
+    modified_segment = bytearray(segment)
+
+    # Iterate through packets to find the first one with an adaptation field
+    for i in range(0, len(modified_segment), TS_PACKET_SIZE):
+        if i + TS_PACKET_SIZE > len(modified_segment):
+            break  # Avoid partial packet
+
+        packet_offset = i
+        adaptation_field_control = (modified_segment[packet_offset + 3] >> 4) & 0b11
+
+        # Check if an adaptation field exists (0b10 or 0b11)
+        if adaptation_field_control in {2, 3}:
+            adaptation_field_length = modified_segment[packet_offset + 4]
+            # Ensure there's room for the flag byte
+            if adaptation_field_length > 0:
+                # Set the discontinuity_indicator bit (bit 7 of the flags byte)
+                modified_segment[packet_offset + 5] |= 0b10000000
+                logger.debug("Discontinuity flag set on packet at offset %s", packet_offset)
+                return bytes(modified_segment)
+
+    # If no packet with an adaptation field was found, we can't set the flag.
+    # This is rare but we return the original segment to avoid errors.
+    logger.warning("Could not find a suitable packet to set the discontinuity flag.")
+    return segment
 
 
 def shift_segment(segment: bytes, offset: int) -> bytes:
     """
-    Shift all TS records in a segment by the given offset (PTS/DTS/PCR).
-    Returns the modified segment.
+    Shifts all timestamps (PTS, DTS, PCR) in a segment by a given offset.
+
+    Args:
+        segment: The raw bytes of the MPEG-TS segment.
+        offset: The value to add to each timestamp.
+
+    Returns:
+        The modified segment with shifted timestamps.
     """
     out = bytearray()
     for i in range(0, len(segment) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
@@ -546,9 +581,14 @@ def shift_segment(segment: bytes, offset: int) -> bytes:
 
 def read_pts_from_segment(segment: bytes):
     """
-    Scan all TS packets in a segment and return the first and last PTS found.
-    Returns tuple (first_pts, last_pts). If only one PTS found, both values are the same.
-    If no PTS found, returns (None, None).
+    Scans all TS packets in a segment and returns the first and last PTS found.
+
+    Args:
+        segment: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        A tuple (first_pts, last_pts). If only one PTS is found, both values
+        are the same. If no PTS is found, returns (None, None).
     """
     first_pts = None
     last_pts = None
@@ -565,7 +605,13 @@ def read_pts_from_segment(segment: bytes):
 
 def read_pts(ts_packet: bytes):
     """
-    Extract PTS from a TS packet. Returns PTS value or None.
+    Extracts the Presentation Timestamp (PTS) from a single TS packet.
+
+    Args:
+        ts_packet: A 188-byte MPEG-TS packet.
+
+    Returns:
+        The PTS value as an integer, or None if not present.
     """
     if len(ts_packet) != TS_PACKET_SIZE:
         return None
@@ -599,7 +645,13 @@ def read_pts(ts_packet: bytes):
 
 def read_dts(ts_packet: bytes):
     """
-    Extract DTS from a TS packet. Returns DTS value or None.
+    Extracts the Decoding Timestamp (DTS) from a single TS packet.
+
+    Args:
+        ts_packet: A 188-byte MPEG-TS packet.
+
+    Returns:
+        The DTS value as an integer, or None if not present.
     """
     if len(ts_packet) != TS_PACKET_SIZE:
         return None
@@ -625,6 +677,15 @@ def read_dts(ts_packet: bytes):
 
 
 def decode_pts_dts(data: bytes):
+    """
+    Decodes a 5-byte PTS/DTS field into a 33-bit integer value.
+
+    Args:
+        data: A 5-byte array containing the encoded timestamp.
+
+    Returns:
+        The decoded 33-bit timestamp value.
+    """
     pts = (((data[0] >> 1) & 0x07) << 30) | (
         (data[1] << 22)
         | (((data[2] >> 1) & 0x7F) << 15)
@@ -635,6 +696,16 @@ def decode_pts_dts(data: bytes):
 
 
 def encode_pts_dts(value: int, flag_bits: int) -> bytes:
+    """
+    Encodes a 33-bit PTS/DTS value into a 5-byte field.
+
+    Args:
+        value: The 33-bit integer timestamp.
+        flag_bits: The 2-bit flag to set (e.g., 0b10 for PTS, 0b01 for DTS).
+
+    Returns:
+        A 5-byte array with the encoded timestamp.
+    """
     val = (flag_bits << 4) | (((value >> 30) & 0x07) << 1) | 0x01
     val2 = (((value >> 15) & 0x7FFF) << 1) | 0x01
     val3 = ((value & 0x7FFF) << 1) | 0x01
@@ -650,7 +721,14 @@ def encode_pts_dts(value: int, flag_bits: int) -> bytes:
 # helper: encode_pts_dts_preserve
 def encode_pts_dts_preserve(value: int, orig_bytes: bytes) -> bytes:
     """
-    Encode PTS/DTS, preserving marker and reserved bits from orig_bytes.
+    Encodes a PTS/DTS value while preserving marker/reserved bits from original.
+
+    Args:
+        value: The new 33-bit integer timestamp.
+        orig_bytes: The original 5-byte encoded timestamp field.
+
+    Returns:
+        A new 5-byte array with the updated timestamp.
     """
     if len(orig_bytes) != 5:
         return encode_pts_dts(value, 0b10)
@@ -670,7 +748,14 @@ def encode_pts_dts_preserve(value: int, orig_bytes: bytes) -> bytes:
 
 def write_pts(ts_packet: bytes, new_pts: int) -> bytes:
     """
-    Overwrite only the PTS field in the TS packet PES header.
+    Overwrites the PTS field in a TS packet's PES header.
+
+    Args:
+        ts_packet: The original TS packet.
+        new_pts: The new PTS value to write.
+
+    Returns:
+        The modified TS packet.
     """
     pts = read_pts(ts_packet)
     if pts is None:
@@ -695,7 +780,14 @@ def write_pts(ts_packet: bytes, new_pts: int) -> bytes:
 
 def write_dts(ts_packet: bytes, new_dts: int) -> bytes:
     """
-    Overwrite only the DTS field in the TS packet PES header.
+    Overwrites the DTS field in a TS packet's PES header.
+
+    Args:
+        ts_packet: The original TS packet.
+        new_dts: The new DTS value to write.
+
+    Returns:
+        The modified TS packet.
     """
     dts = read_dts(ts_packet)
     if dts is None:
@@ -725,6 +817,15 @@ def write_dts(ts_packet: bytes, new_dts: int) -> bytes:
 
 
 def read_pcr(ts_packet: bytes):
+    """
+    Reads the Program Clock Reference (PCR) from a TS packet.
+
+    Args:
+        ts_packet: A 188-byte MPEG-TS packet.
+
+    Returns:
+        A tuple of (pcr_base, pcr_extension), or None if not present.
+    """
     if len(ts_packet) != TS_PACKET_SIZE:
         return None
 
@@ -738,7 +839,7 @@ def read_pcr(ts_packet: bytes):
         return None
 
     # PCR flag must be set
-    if not (ts_packet[5] & 0x10):
+    if not ts_packet[5] & 0x10:
         return None
 
     # Reserved bits in PCR (bits 6-1 of byte 10) must be 0x7E (111111)
@@ -759,9 +860,17 @@ def read_pcr(ts_packet: bytes):
 
 def write_pcr(ts_packet: bytes, new_pcr: int | tuple[int, int]) -> bytes:  # pylint: disable=unsupported-binary-operation
     """
-    Write PCR base and extension to a TS packet. new_pcr can be:
-      - int: only base (extension set to 0)
-      - tuple: (base, ext)
+    Writes a new PCR value into a TS packet's adaptation field.
+
+    If the packet does not have an adaptation field, one will be created.
+
+    Args:
+        ts_packet: The original TS packet.
+        new_pcr: The new PCR value, either as an integer (base only) or a
+                 tuple of (base, extension).
+
+    Returns:
+        The modified TS packet.
     """
     if len(ts_packet) != TS_PACKET_SIZE:
         return ts_packet
@@ -816,7 +925,14 @@ def write_pcr(ts_packet: bytes, new_pcr: int | tuple[int, int]) -> bytes:  # pyl
 
 def shift_pts(ts_packet: bytes, offset: int) -> bytes:
     """
-    Shift only the PTS value in the TS packet by the given offset.
+    Shifts the PTS value in a single TS packet by a given offset.
+
+    Args:
+        ts_packet: The original TS packet.
+        offset: The value to add to the PTS.
+
+    Returns:
+        The modified TS packet.
     """
     pts = read_pts(ts_packet)
     if pts is None:
@@ -841,7 +957,14 @@ def shift_pts(ts_packet: bytes, offset: int) -> bytes:
 
 def shift_dts(ts_packet: bytes, offset: int) -> bytes:
     """
-    Shift only the DTS value in the TS packet by the given offset.
+    Shifts the DTS value in a single TS packet by a given offset.
+
+    Args:
+        ts_packet: The original TS packet.
+        offset: The value to add to the DTS.
+
+    Returns:
+        The modified TS packet.
     """
     dts = read_dts(ts_packet)
     if dts is None:
@@ -870,6 +993,16 @@ def shift_dts(ts_packet: bytes, offset: int) -> bytes:
 
 
 def shift_pcr(ts_packet: bytes, offset: int) -> bytes:
+    """
+    Shifts the PCR value in a single TS packet by a given offset.
+
+    Args:
+        ts_packet: The original TS packet.
+        offset: The value to add to the PCR base.
+
+    Returns:
+        The modified TS packet.
+    """
     pcr = read_pcr(ts_packet)
     if pcr is None:
         return ts_packet
@@ -878,87 +1011,97 @@ def shift_pcr(ts_packet: bytes, offset: int) -> bytes:
 
 
 def shift_ts_packet(ts_packet: bytes, offset: int) -> bytes:
-    # logger.debug(f">>> Shifting TS packet by offset={offset}, pcr={pcr}")
+    """
+    Shifts all relevant timestamps (PTS, DTS, PCR) in a single TS packet.
+
+    Args:
+        ts_packet: The original TS packet.
+        offset: The value to add to the timestamps.
+
+    Returns:
+        The modified TS packet.
+    """
+    # logger.debug(">>> Shifting TS packet by offset=%s, pcr=%s", offset, pcr)
 
     pts = read_pts(ts_packet)
     if pts is not None:
-        # logger.debug(f">>> PTS before shift: {pts1}")
+        # logger.debug(">>> PTS before shift: %s", pts1)
         ts_packet = shift_pts(ts_packet, offset)
 
     dts = read_dts(ts_packet)
     if dts is not None:
-        # logger.debug(f">>> DTS before shift: {dts1}")
+        # logger.debug(">>> DTS before shift: %s", dts1)
         ts_packet = shift_dts(ts_packet, offset)
 
     pcr1 = read_pcr(ts_packet)
     if pcr1 is not None:
-        # logger.debug(f">>> PCR before shift: {pcr1}")
+        # logger.debug(">>> PCR before shift: %s", pcr1)
         ts_packet = shift_pcr(ts_packet, offset)
 
     return ts_packet
 
 
 def shift_ts_packet_test(ts_packet: bytes, offset: int) -> bytes:
-    # logger.debug(f">>> Shifting TS packet by offset={offset}, pcr={pcr}")
-    # logger.debug(f"TS packet before shift: {ts_packet.hex()}")
+    """
+    A test variant of shift_ts_packet for debugging purposes.
+
+    This function includes extra logging to track timestamp changes and
+    verify that the packet modification is correct.
+
+    Args:
+        ts_packet: The original TS packet.
+        offset: The value to add to the timestamps.
+
+    Returns:
+        The modified TS packet.
+    """
+    # logger.debug(">>> Shifting TS packet by offset=%s, pcr=%s", offset, pcr)
+    # logger.debug("TS packet before shift: %s", ts_packet.hex())
 
     pts1 = read_pts(ts_packet)
     if pts1 is not None:
-        # logger.debug(f">>> PTS before shift: {pts1}")
+        # logger.debug(">>> PTS before shift: %s", pts1)
         ts_packet2 = shift_pts(ts_packet, offset)
         _pts2 = read_pts(ts_packet2)
-        # logger.debug(f">>> PTS after shift: {pts2}")
+        # logger.debug(">>> PTS after shift: %s", pts2)
         # if pts2 != pts1:
-        #     logger.error(f">>> PTS changed after shift: {pts1} -> {pts2}")
+        #     logger.error(">>> PTS changed after shift: %s -> %s", pts1, pts2)
         if ts_packet != ts_packet2:
-            logger.error(f">>> TS packet changed after PTS shift: {ts_packet.hex()} -> {ts_packet2.hex()}")
+            logger.error(">>> TS packet changed after PTS shift: %s -> %s", ts_packet.hex(), ts_packet2.hex())
         ts_packet = ts_packet2
 
     dts1 = read_dts(ts_packet)
     if dts1 is not None:
-        # logger.debug(f">>> DTS before shift: {dts1}")
+        # logger.debug(">>> DTS before shift: %s", dts1)
         ts_packet2 = shift_dts(ts_packet, offset)
         _dts2 = read_dts(ts_packet2)
-        # logger.debug(f">>> DTS after shift: {dts2}")
+        # logger.debug(">>> DTS after shift: %s", dts2)
         # if dts2 != dts1:
-        #     logger.error(f">>> DTS changed after shift: {dts1} -> {dts2}")
+        #     logger.error(">>> DTS changed after shift: %s -> %s", dts1, dts2)
         if ts_packet != ts_packet2:
-            logger.error(f">>> TS packet changed after DTS shift: {ts_packet.hex()} -> {ts_packet2.hex()}")
+            logger.error(">>> TS packet changed after DTS shift: %s -> %s", ts_packet.hex(), ts_packet2.hex())
         ts_packet = ts_packet2
 
     pcr1 = read_pcr(ts_packet)
     if pcr1 is not None:
-        # logger.debug(f">>> PCR before shift: {pcr1}")
+        # logger.debug(">>> PCR before shift: %s", pcr1)
         ts_packet2 = shift_pcr(ts_packet, pcr1)
         if ts_packet != ts_packet2:
-            logger.error(f">>> TS packet changed after PCR shift: {ts_packet.hex()} -> {ts_packet2.hex()}")
+            logger.error(">>> TS packet changed after PCR shift: %s -> %s", ts_packet.hex(), ts_packet2.hex())
         ts_packet = ts_packet2
-    # logger.debug(f">>> TS packet after shift: {ts_packet.hex()}")
-    return ts_packet
-
-
-def set_discontinuity_flag(ts_packet: bytes) -> bytes:
-    if len(ts_packet) != TS_PACKET_SIZE:
-        raise ValueError("Invalid TS packet size")
-
-    adaptation_field_control = (ts_packet[3] >> 4) & 0b11
-
-    if adaptation_field_control in {2, 3}:
-        adaptation_field_length = ts_packet[4]
-        if adaptation_field_length == 0 or len(ts_packet) <= 5:
-            return ts_packet
-
-        modified = bytearray(ts_packet)
-        modified[5] |= 0b10000000  # Set discontinuity_indicator
-        return bytes(modified)
-
+    # logger.debug(">>> TS packet after shift: %s", ts_packet.hex())
     return ts_packet
 
 
 def extract_frame_rate_from_segment_data(segment_data: bytes):
     """
-    Extract frame rate from TS segment data using FFmpeg directly.
-    Returns the frame rate as a float, or None if not found.
+    Extracts the frame rate from TS segment data using ffprobe.
+
+    Args:
+        segment_data: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        The frame rate as a float, or None if not found.
     """
     # Write segment data to a temporary file
     with tempfile.NamedTemporaryFile(suffix='.ts', delete=False) as temp_file:
@@ -978,7 +1121,7 @@ def extract_frame_rate_from_segment_data(segment_data: bytes):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
 
         if result.returncode != 0:
-            print(f"FFprobe failed with error: {result.stderr}")
+            logger.debug("FFprobe failed with error: %s", result.stderr)
             return None
 
         # Parse JSON output
@@ -992,7 +1135,7 @@ def extract_frame_rate_from_segment_data(segment_data: bytes):
                 break
 
         if not video_stream:
-            print("No video stream found")
+            logger.debug("No video stream found")
             return None
 
         # Try to get frame rate from various fields
@@ -1038,13 +1181,13 @@ def extract_frame_rate_from_segment_data(segment_data: bytes):
                     pass
 
         if frame_rate is None:
-            print("Frame rate not available in stream metadata")
+            logger.debug("Frame rate not available in stream metadata")
             return None
 
         return frame_rate
 
     except (subprocess.TimeoutExpired, OSError) as e:
-        print(f"Error running FFprobe: {e}")
+        logger.debug("Error running FFprobe: %s", e)
         return None
     finally:
         # Clean up temporary file
@@ -1056,8 +1199,17 @@ def extract_frame_rate_from_segment_data(segment_data: bytes):
 
 def extract_resolution_from_segment_data(segment_data: bytes):
     """
-    Extract video resolution (width, height) from TS segment data by parsing the first H.264 SPS NAL unit.
-    Returns (width, height) as integers, or (None, None) if not found.
+    Extracts video resolution by parsing the H.264 SPS NAL unit.
+
+    This function avoids using ffprobe for performance, directly parsing the
+    bitstream to find the Sequence Parameter Set (SPS) and read the
+    picture width and height.
+
+    Args:
+        segment_data: The raw bytes of the MPEG-TS segment.
+
+    Returns:
+        A tuple of (width, height), or (None, None) if not found.
     """
     video_pid = find_video_pid_in_segment(segment_data)
     if video_pid is None:
@@ -1106,8 +1258,16 @@ def extract_resolution_from_segment_data(segment_data: bytes):
 
 def parse_h264_sps_resolution(sps_bytes: bytes):
     """
-    Parse H.264 SPS bytes to extract width and height.
-    Returns (width, height) or (None, None) if parsing fails.
+    Parses H.264 Sequence Parameter Set (SPS) bytes to extract resolution.
+
+    This is a low-level bitstream parsing function that reads the SPS structure
+    to calculate the video's width and height.
+
+    Args:
+        sps_bytes: The bytes of the SPS NAL unit.
+
+    Returns:
+        A tuple of (width, height), or (None, None) if parsing fails.
     """
     # Bitstream reader
     class BitReader:
@@ -1202,7 +1362,7 @@ def parse_h264_sps_resolution(sps_bytes: bytes):
             crop_top = br.read_ue()
             crop_bottom = br.read_ue()
         width = ((pic_width_in_mbs_minus1 + 1) * 16) - (crop_left + crop_right) * 2
-        height = ((pic_height_in_map_units_minus1 + 1) * 16)
+        height = (pic_height_in_map_units_minus1 + 1) * 16
         if not frame_mbs_only_flag:
             height *= 2
         height -= (crop_top + crop_bottom) * 2

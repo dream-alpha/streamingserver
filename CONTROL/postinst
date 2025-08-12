@@ -4,6 +4,7 @@ CHROOT_DIR=/data/ubuntu
 $CHROOT_DIR/root/mount_chroot
 chroot "$CHROOT_DIR" /bin/bash -c "
   echo '[*] Updating plugin packages...'
+  apt install ffmpeg
   /root/venv/bin/pip install -r /root/plugins/streamingserver/requirements.txt
 "
 $CHROOT_DIR/root/unmount_chroot
