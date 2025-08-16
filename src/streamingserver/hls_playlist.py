@@ -51,7 +51,8 @@ class HLSPlaylistProcessor:
                 # Only reset deduplication for major discontinuities (sequence changes), not content boundaries
                 if self.reset_dedup:
                     logger.debug(
-                        f">> Major discontinuity detected, clearing deduplication window (had {len(self.dedup_window)} items)"
+                        ">> Major discontinuity detected, clearing deduplication window (had %s items)",
+                        len(self.dedup_window),
                     )
                     self.dedup_window.clear()
                     self.reset_dedup = False
@@ -86,16 +87,18 @@ class HLSPlaylistProcessor:
                 case "#EXT-X-MEDIA-SEQUENCE":
                     media_sequence = int(line.split(":", 1)[1])
                     sequence = media_sequence
-                    logger.debug(f"Tag: MEDIA-SEQUENCE = {media_sequence}")
+                    logger.debug("Tag: MEDIA-SEQUENCE = %s", media_sequence)
 
                 case "#EXT-X-DISCONTINUITY-SEQUENCE":
                     discontinuity_sequence = int(line.split(":", 1)[1])
                     logger.debug(
-                        f"Tag: DISCONTINUITY-SEQUENCE = {discontinuity_sequence}"
+                        "Tag: DISCONTINUITY-SEQUENCE = %s", discontinuity_sequence
                     )
                     if discontinuity_sequence != self.current_discontinuity_sequence:
                         logger.debug(
-                            f">> Discontinuity sequence changed: {self.current_discontinuity_sequence} -> {discontinuity_sequence}"
+                            ">> Discontinuity sequence changed: %s -> %s",
+                            self.current_discontinuity_sequence,
+                            discontinuity_sequence,
                         )
 
                         # HLS Rule: Reset deduplication for backwards jumps (stream restarts)
@@ -123,11 +126,11 @@ class HLSPlaylistProcessor:
 
                 case "#EXT-X-PLAYLIST-TYPE":
                     playlist_type = line.split(":", 1)[1]
-                    logger.debug(f"Tag: PLAYLIST-TYPE = {playlist_type}")
+                    logger.debug("Tag: PLAYLIST-TYPE = %s", playlist_type)
 
                 case "#EXT-X-KEY":
                     encryption_key = line
-                    logger.debug(f"Tag: KEY = {encryption_key}")
+                    logger.debug("Tag: KEY = %s", encryption_key)
 
                     # Parse and update current encryption info
                     if line.startswith("#EXT-X-KEY:"):
@@ -164,36 +167,36 @@ class HLSPlaylistProcessor:
                         current_segment_duration = float(duration_str)
                     except Exception:
                         current_segment_duration = None
-                    logger.debug(f"Tag: INF (segment duration line) duration={current_segment_duration}")
+                    logger.debug("Tag: INF (segment duration line) duration=%s", current_segment_duration)
 
                 case "#EXT-X-PART-INF" | "#EXT-X-PART" | "#EXT-X-PRELOAD-HINT":
-                    logger.debug(f"Tag: Low-latency segment related tag: {tag}")
+                    logger.debug("Tag: Low-latency segment related tag: %s", tag)
 
                 case "#EXT-X-BYTERANGE":
                     byte_range = line
-                    logger.debug(f"Tag: BYTERANGE = {byte_range}")
+                    logger.debug("Tag: BYTERANGE = %s", byte_range)
 
                 case "#EXT-X-PROGRAM-DATE-TIME":
-                    logger.debug(f"Tag: PROGRAM-DATE-TIME = {line.split(':', 1)[1]}")
+                    logger.debug("Tag: PROGRAM-DATE-TIME = %s", line.split(":", 1)[1])
 
                 case "#EXT-X-CUE-OUT" | "#EXT-X-CUE-IN":
-                    logger.debug(f"Tag: CUE marker = {tag}")
+                    logger.debug("Tag: CUE marker = %s", tag)
 
                 case "#EXT-X-DATERANGE":
-                    logger.debug(f"Tag: DATERANGE = {line}")
+                    logger.debug("Tag: DATERANGE = %s", line)
 
                 case "#EXTM3U":
                     logger.debug("Tag: M3U header")
 
                 case "#EXT-X-VERSION":
                     version = line.split(":", 1)[1] if ":" in line else "unknown"
-                    logger.debug(f"Tag: VERSION = {version}")
+                    logger.debug("Tag: VERSION = %s", version)
 
                 case "#EXT-X-TARGETDURATION":
                     target_duration = (
                         line.split(":", 1)[1] if ":" in line else "unknown"
                     )
-                    logger.debug(f"Tag: TARGETDURATION = {target_duration}")
+                    logger.debug("Tag: TARGETDURATION = %s", target_duration)
 
                     # Store numeric value for HLS rule checking
                     try:
@@ -203,23 +206,23 @@ class HLSPlaylistProcessor:
 
                 case "#EXT-X-ALLOW-CACHE":
                     allow_cache = line.split(":", 1)[1] if ":" in line else "unknown"
-                    logger.debug(f"Tag: ALLOW-CACHE = {allow_cache}")
+                    logger.debug("Tag: ALLOW-CACHE = %s", allow_cache)
 
                 case "#EXT-X-MEDIA":
                     media_info = line.split(":", 1)[1] if ":" in line else ""
-                    logger.debug(f"Tag: MEDIA = {media_info[:50]}...")
+                    logger.debug("Tag: MEDIA = %s...", media_info[:50])
 
                 case "#EXT-X-STREAM-INF":
                     stream_info = line.split(":", 1)[1] if ":" in line else ""
-                    logger.debug(f"Tag: STREAM-INF = {stream_info[:50]}...")
+                    logger.debug("Tag: STREAM-INF = %s...", stream_info[:50])
 
                 case "#PLUTO-SESSION-ID":
                     session_id = line.split(":", 1)[1] if ":" in line else ""
-                    logger.debug(f"Tag: PLUTO-SESSION-ID = {session_id[:20]}...")
+                    logger.debug("Tag: PLUTO-SESSION-ID = %s...", session_id[:20])
 
                 case "#PLUTO-VERSION":
                     pluto_version = line.split(":", 1)[1] if ":" in line else ""
-                    logger.debug(f"Tag: PLUTO-VERSION = {pluto_version}")
+                    logger.debug("Tag: PLUTO-VERSION = %s", pluto_version)
 
                 case "#EXT-X-ENDLIST":
                     endlist_seen = True
@@ -238,12 +241,14 @@ class HLSPlaylistProcessor:
                     if tag.strip():
                         line_display = line[:50] + "..." if len(line) > 50 else line
                         logger.debug(
-                            f"Tag: Unhandled tag: '{tag}' (from line: '{line_display}')"
+                            "Tag: Unhandled tag: '%s' (from line: '%s')",
+                            tag,
+                            line_display,
                         )
                     else:
                         line_display = line[:50] + "..." if len(line) > 50 else line
                         logger.debug(
-                            f"Tag: Empty or malformed tag from line: '{line_display}'"
+                            "Tag: Empty or malformed tag from line: '%s'", line_display
                         )
 
         if media_sequence is not None:
@@ -273,7 +278,7 @@ class HLSPlaylistProcessor:
         if isinstance(playlist_lines, str):
             playlist_lines = playlist_lines.strip().split("\n")
 
-        logger.debug(f">> Processing playlist with {len(playlist_lines)} lines")
+        logger.debug(">> Processing playlist with %s lines", len(playlist_lines))
         if len(playlist_lines) == 0:
             logger.debug(">> Empty playlist")
 
@@ -290,12 +295,15 @@ class HLSPlaylistProcessor:
         try:
             media_sequence, new_playlist = self.parse_playlist(playlist_lines)
         except Exception as e:
-            logger.debug(f"[WARNING] Playlist parsing error: {e}. Skipping playlist.")
+            logger.debug("[WARNING] Playlist parsing error: %s. Skipping playlist.", e)
             return []
 
         if media_sequence is None:
             logger.debug("[WARNING] Missing #EXT-X-MEDIA-SEQUENCE in playlist. Skipping playlist.")
             return []
+
+        # Track if dedup was reset
+        dedup_was_cleared = False
 
         # Check for media sequence discontinuities that require deduplication reset
         # Following HLS RFC 8216 guidelines
@@ -304,8 +312,9 @@ class HLSPlaylistProcessor:
 
             # HLS Rule 1: Reset on backwards media sequence (stream restart)
             if sequence_diff < 0:
-                logger.debug(f">> HLS RULE: Media sequence decreased {self.current_sequence} -> {media_sequence} (stream restart), resetting deduplication")
+                logger.debug(">> HLS RULE: Media sequence decreased %s -> %s (stream restart), resetting deduplication", self.current_sequence, media_sequence)
                 self.dedup_window.clear()
+                dedup_was_cleared = True
 
             # HLS Rule 2: Reset on large forward jumps
             # Use target duration if available, otherwise default to 3x typical segments (15)
@@ -315,38 +324,48 @@ class HLSPlaylistProcessor:
                 max_jump = max(15, self.target_duration * 3)
 
             if sequence_diff > max_jump:
-                logger.debug(f">> HLS RULE: Large media sequence jump {self.current_sequence} -> {media_sequence} (exceeds {max_jump} segments), resetting deduplication")
+                logger.debug(">> HLS RULE: Large media sequence jump %s -> %s (exceeds %s segments), resetting deduplication", self.current_sequence, media_sequence, max_jump)
                 self.dedup_window.clear()
+                dedup_was_cleared = True
 
             # Log normal progression
             elif sequence_diff > 5:
-                logger.debug(f">> HLS: Notable media sequence jump {self.current_sequence} -> {media_sequence} (+{sequence_diff}) but within threshold")
+                logger.debug(">> HLS: Notable media sequence jump %s -> %s (+%s) but within threshold", self.current_sequence, media_sequence, sequence_diff)
             elif sequence_diff > 0:
-                logger.debug(f">> HLS: Normal media sequence progression {self.current_sequence} -> {media_sequence} (+{sequence_diff})")
+                logger.debug(">> HLS: Normal media sequence progression %s -> %s (+%s)", self.current_sequence, media_sequence, sequence_diff)
 
             # Same sequence - normal for live streams
             elif sequence_diff == 0:
-                logger.debug(f">> HLS: Same media sequence {media_sequence} (normal for live stream updates)")
+                logger.debug(">> HLS: Same media sequence %s (normal for live stream updates)", media_sequence)
 
         # HLS Rule 3: Check for playlist type changes
         if self.playlist_type != self.last_playlist_type:
             if self.last_playlist_type is not None:  # Don't reset on first playlist
-                logger.debug(f">> HLS RULE: Playlist type changed {self.last_playlist_type} -> {self.playlist_type}, resetting deduplication")
+                logger.debug(">> HLS RULE: Playlist type changed %s -> %s, resetting deduplication", self.last_playlist_type, self.playlist_type)
                 self.dedup_window.clear()
+                dedup_was_cleared = True
         self.last_playlist_type = self.playlist_type
 
         # HLS Rule 4: Check for ENDLIST changes (stream restart indicators)
         if self.last_endlist_seen and not self.endlist_seen:
             logger.debug(">> HLS RULE: ENDLIST removed (stream restart), resetting deduplication")
             self.dedup_window.clear()
+            dedup_was_cleared = True
         self.last_endlist_seen = self.endlist_seen
 
         # HLS Rule 5: Check for target duration changes
         if self.target_duration != self.last_target_duration:
             if self.last_target_duration is not None:  # Don't reset on first playlist
-                logger.debug(f">> HLS RULE: Target duration changed {self.last_target_duration} -> {self.target_duration}, resetting deduplication")
+                logger.debug(">> HLS RULE: Target duration changed %s -> %s, resetting deduplication", self.last_target_duration, self.target_duration)
                 self.dedup_window.clear()
+                dedup_was_cleared = True
         self.last_target_duration = self.target_duration
+
+        # If dedup was reset, repopulate dedup_window with current playlist URIs
+        if dedup_was_cleared:
+            for _, uri, _, _ in new_playlist:
+                if uri not in self.dedup_window:
+                    self.dedup_window.append(uri)
 
         if not self.last_playlist:
             result = [
@@ -378,7 +397,7 @@ class HLSPlaylistProcessor:
 
         # Parse the encryption key line
         # Format: #EXT-X-KEY:METHOD=AES-128,URI="...",IV=0x...
-        logger.debug(f"Parsing encryption key: {self.encryption_key}")
+        logger.debug("Parsing encryption key: %s", self.encryption_key)
         if self.encryption_key.startswith("#EXT-X-KEY:"):
             key_data = self.encryption_key[len("#EXT-X-KEY:"):]
 
@@ -469,16 +488,16 @@ if __name__ == "__main__":
 
     processor = HLSPlaylistProcessor()
 
-    logger.debug("\nProcessing playlist 1:")
-    logger.debug(processor.process(playlist1))
+    logger.info("\nProcessing playlist 1:")
+    logger.info(processor.process(playlist1))
 
-    logger.debug("Processing first subplaylist with sequence 101:")
-    logger.debug(processor.process(subplaylist_a))
+    logger.info("Processing first subplaylist with sequence 101:")
+    logger.info(processor.process(subplaylist_a))
 
-    logger.debug(
+    logger.info(
         "\nProcessing second subplaylist with same sequence 101 (differs slightly):"
     )
-    logger.debug(processor.process(subplaylist_b))
+    logger.info(processor.process(subplaylist_b))
 
-    logger.debug("Processing playlist 3 with sequence 104:")
-    logger.debug(processor.process(playlist3))
+    logger.info("Processing playlist 3 with sequence 104:")
+    logger.info(processor.process(playlist3))

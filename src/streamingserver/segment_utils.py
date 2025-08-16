@@ -101,6 +101,9 @@ def append_to_rec_file(
         segment_index: The index of the segment, used for logging and filenames.
     """
 
+    # Remove unwanted PIDs (e.g., SCTE-35, ID3) from the segment data
+    # segment_data = remove_pids(segment_data, [0x1f6, 0x1f4])
+
     log_file = os.path.splitext(rec_file)[0] + '.log'
     uri_name = os.path.basename(current_uri)
     pkt_file = os.path.splitext(rec_file)[0] + f"_{segment_index}.ts"
@@ -116,7 +119,7 @@ def append_to_rec_file(
         with open(log_file, 'a', encoding="utf-8") as log_f:
             log_f.write(f"{segment_index}: {uri_name}\n")
 
-        if False:
+        if True:
             with open(pkt_file, 'wb') as pkt_f:
                 pkt_f.write(segment_data)
 
@@ -342,3 +345,28 @@ def get_segment_properties(segment_data: bytes) -> tuple[str | None, float | Non
         except Exception as e:
             logger.error("❌ An unexpected error occurred while getting segment properties: %s", e)
             return None, None, None
+
+
+def remove_pids(segment_data, pids):
+    """
+    Removes unwanted PIDs from MPEG-TS data.
+    Pure Python implementation, no remuxing or re-encoding.
+    """
+    TS_PACKET_SIZE = 188
+    if len(segment_data) % TS_PACKET_SIZE != 0:
+        # Not a valid TS stream, return original
+        return segment_data
+
+    def get_pid(pkt):
+        return ((pkt[1] & 0x1F) << 8) | pkt[2]
+
+    filtered = bytearray()
+    for i in range(0, len(segment_data), TS_PACKET_SIZE):
+        pkt = segment_data[i : i + TS_PACKET_SIZE]
+        pid = get_pid(pkt)
+        if pid not in pids:
+            filtered.extend(pkt)
+
+    if not filtered:
+        return segment_data
+    return bytes(filtered)

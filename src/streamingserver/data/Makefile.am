@@ -1,2 +1,2 @@
 installdir = /data/ubuntu/root/plugins/streamingserver/data
-install_DATA = *.m3u8
+install_DATA = *.txt

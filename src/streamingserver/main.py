@@ -56,9 +56,8 @@ class HLS_Recorder:
         self._stop_event = threading.Event()
         self.channel_uri = ""
         self.socketserver = None
-
         self.playlist_processor = None
-        self.session = get_session()
+        self.session = None
 
     def record_stream(self, channel_uri, rec_file):
         """
@@ -81,7 +80,6 @@ class HLS_Recorder:
         segment_index = 0
         section_index = -1
         self.is_running = True
-        endlist_recovery_triggered = False
         previous_uri = None
         previous_duration = 0
         previous_pts = 0
@@ -90,53 +88,54 @@ class HLS_Recorder:
         offset = 0
         continuous_pts = 0  # Continuous timeline for playback (never goes backwards)
         empty_playlist_count = 0
-        max_empty_playlists = 10
+        max_empty_playlists = 5
         failed_playlist_count = 0
         max_failed_playlists = 5
         cc_map = {}  # Map to track CC
         monotonize_segment = False
+        reload_master_playlist = True
+        media_playlist_url = None
 
         self.playlist_processor = HLSPlaylistProcessor()
-        media_playlist_url = get_master_playlist(self.session, channel_uri)
 
         try:
             while not self._stop_event.is_set():
+                if reload_master_playlist:
+                    self.session = get_session()
+                    media_playlist_url = get_master_playlist(self.session, channel_uri)
+                    reload_master_playlist = False
 
                 playlist = get_playlist(self.session, media_playlist_url)
                 if not playlist:
                     logger.error("❌ Failed to fetch playlist, retrying...")
                     failed_playlist_count += 1
                     if failed_playlist_count >= max_failed_playlists:
-                        logger.error("❌ Too many failed playlist fetches. Aborting...")
-                        self.socketserver.broadcast({"command": "stop", "args": ["error", self.channel_uri, rec_file]})
-                        break
+                        logger.error("❌ Too many failed playlist fetches. Reloading master playlist...")
+                        reload_master_playlist = True
+                        # self.socketserver.broadcast({"command": "stop", "args": ["error", self.channel_uri, rec_file]})
+                        continue
                     time.sleep(1)
                     continue
+                failed_playlist_count = 0
 
                 uri_list = self.playlist_processor.process(playlist)
-                # If no new playlist entries, wait a bit and try again
                 if not uri_list:
                     empty_playlist_count += 1
                     logger.debug("⏳ No new segments found, waiting for next playlist update...")
                     if empty_playlist_count >= max_empty_playlists:
-                        logger.debug("❌ Playlist has been empty for too long. Aborting...")
-                        self.socketserver.broadcast({"command": "stop", "args": ["empty", self.channel_uri, rec_file]})
-                        break
+                        logger.info("❌ Playlist has been empty for too long. Reloading master playlist...")
+                        # self.socketserver.broadcast({"command": "stop", "args": ["empty", self.channel_uri, rec_file]})
+                        reload_master_playlist = True
+                        continue
                     time.sleep(1)
                     continue
                 empty_playlist_count = 0  # Reset on success
 
                 logger.debug("🔄 URI list has %s new segments", len(uri_list))
-                # Recovery: If ENDLIST is seen, re-fetch master playlist and reset processor
-                if self.playlist_processor.endlist_seen and not endlist_recovery_triggered:
-                    logger.debug("🛑 ENDLIST detected in playlist. Triggering recovery: re-fetching master playlist and resetting playlist processor.")
-                    media_playlist_url = get_master_playlist(self.session, channel_uri)
-                    self.playlist_processor = HLSPlaylistProcessor()
-                    endlist_recovery_triggered = True
-                    time.sleep(1)
+                if self.playlist_processor.endlist_seen:
+                    logger.debug("🛑 ENDLIST detected in playlist. Re-fetching master playlist.")
+                    reload_master_playlist = True
                     continue
-                if not self.playlist_processor.endlist_seen:
-                    endlist_recovery_triggered = False
 
                 for current_uri, segment_encryption_info, current_duration in uri_list:
                     logger.info("Segment URI list 1: %s: %s", segment_index, current_uri)
@@ -160,10 +159,15 @@ class HLS_Recorder:
                     if current_pts is None:
                         raise ValueError(f"No PTS found in segment {segment_index}")
 
+                    if current_duration <= 90000:
+                        logger.warning("Segment duration is too short, skipping segment %s", segment_index)
+                        continue
+
                     # Check if segment URI has changed
                     if different_uris(previous_uri, current_uri):
-                        logger.info("Changing URI from: %s", previous_uri)
-                        logger.info("Changing URI to:   %s", current_uri)
+                        logger.info("Prev URI: %s", previous_uri)
+                        logger.info(">" * 70)
+                        logger.info("Next URI: %s", current_uri)
                         if previous_resolution != current_resolution:
                             logger.info("Changing resolution: %s > %s", previous_resolution, current_resolution)
                             monotonize_segment = current_resolution != "1920x1080"
@@ -194,10 +198,11 @@ class HLS_Recorder:
                         segment_data = set_discontinuity_segment(segment_data)
 
                     # ready to append segment data to file
-                    section_file = f"{os.path.splitext(rec_file)[0]}_{section_index}.ts"
+                    short_resolution = "h" if current_resolution == "1920x1080" else "l"
+                    section_file = f"{os.path.splitext(rec_file)[0]}_{short_resolution}_{section_index}.ts"
                     append_to_rec_file(section_file, segment_data, org_segment_data, current_uri, segment_index)
 
-                    if section_index == 0 and segment_index == 2:
+                    if section_index == 0 and segment_index == 5:
                         # send recording start message to client
                         if hasattr(self, 'socketserver'):
                             self.socketserver.broadcast({"command": "start", "args": [self.channel_uri, section_file]})

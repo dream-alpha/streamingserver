@@ -7,7 +7,6 @@ chroot "$CHROOT_DIR" /bin/bash -c "
   apt install ffmpeg
   /root/venv/bin/pip install -r /root/plugins/streamingserver/requirements.txt
 "
-$CHROOT_DIR/root/unmount_chroot
+$CHROOT_DIR/root/umount_chroot
 echo "Plugin successfully installed."
-echo "Please restart DreamOS now!"
 exit 0

@@ -21,7 +21,7 @@ import ast
 import os
 
 
-DEFAULT_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "settings.txt")
+DEFAULT_CONFIG_FILE = "/etc/enigma2/settings.txt"
 
 
 class ValueWrapper:
