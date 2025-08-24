@@ -6,11 +6,16 @@ UBUNTU_DIR=$CHROOT_DIR/root/plugins/streamingserver
 mkdir -p $UBUNTU_DIR
 cp -avr $ENIGMA2_DIR/* $UBUNTU_DIR/
 
+# Disable systemd maintainer scripts BEFORE chroot and package config
+echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.postinst
+chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.postinst
+echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.prerm
+chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.prerm
+echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
+chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
+
 $CHROOT_DIR/root/mount_chroot
 chroot "$CHROOT_DIR" /bin/bash -c "
-    # Disable systemd
-    echo -e '#!/bin/sh\nexit 0' > /var/lib/dpkg/info/systemd.postinst
-    chmod +x /var/lib/dpkg/info/systemd.postinst
     dpkg --configure -a
 
     echo '[*] Updating plugin packages...'

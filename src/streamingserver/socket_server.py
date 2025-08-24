@@ -1,6 +1,6 @@
 import json
 import socketserver
-from m3u8_playlist_utils import get_playlist
+from m3u8_playlist_utils import get_playlist_groups
 from plutotv_utils import create_playlist_and_epg
 from debug import get_logger
 
@@ -41,7 +41,7 @@ class RecorderCommandHandler(socketserver.BaseRequestHandler):
                         self.server.recorder.stop()
                     elif cmd == "get_playlist":
                         create_playlist_and_epg()
-                        playlist = get_playlist("/root/plugins/streamingserver/data/plutotv-playlist.m3u8")
+                        playlist = get_playlist_groups("/root/plugins/streamingserver/data/plutotv-playlist.m3u8")
                         response = {"command": "get_playlist", "args": [playlist]}
                         self.request.sendall((json.dumps(response) + '\n').encode())
                     else:

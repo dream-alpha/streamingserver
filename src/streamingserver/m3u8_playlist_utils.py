@@ -6,7 +6,43 @@ It is designed to extract structured information from standard M3U8 `#EXTINF`
 entries, including duration, display name, attributes (like `tvg-id`, `tvg-logo`),
 and the associated stream URL.
 """
+
+
 import re
+from collections import defaultdict
+
+
+def get_playlist_groups(filepath):
+    groups = defaultdict(list)
+    current_info = None
+
+    with open(filepath, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("#EXTINF:"):
+                # Extract attributes and channel name
+                match = re.search(r'group-title="([^"]+)"', line)
+                group = match.group(1) if match else "Unknown"
+                # Extract channel name (after last comma)
+                channel_name = line.split(",")[-1].strip()
+                # Extract logo and tvg-id if needed
+                logo_match = re.search(r'tvg-logo="([^"]+)"', line)
+                logo = logo_match.group(1) if logo_match else ""
+                tvg_id_match = re.search(r'tvg-id="([^"]+)"', line)
+                tvg_id = tvg_id_match.group(1) if tvg_id_match else ""
+                current_info = {
+                    "name": channel_name,
+                    "logo": logo,
+                    "tvg_id": tvg_id,
+                    "url": None
+                }
+                current_group = group
+            elif line and not line.startswith("#"):
+                if current_info:
+                    current_info["url"] = line  # pylint: disable=unsupported-assignment-operation
+                    groups[current_group].append(current_info)
+                    current_info = None
+    return dict(groups)
 
 
 def get_playlist(file_path: str) -> list[dict]:
@@ -22,52 +58,27 @@ def get_playlist(file_path: str) -> list[dict]:
     """
     with open(file_path, 'r', encoding='utf-8') as f:
         m3u8_text = f.read()
-    return parse_m3u8_entry(m3u8_text)
-
-
-def parse_m3u8_entry(m3u8_text: str) -> list[dict]:
-    """
-    Parses #EXTINF entries from an M3U8 playlist string.
-
-    This function extracts information from `#EXTINF` lines, including duration,
-    key-value attributes (e.g., `tvg-id`), the display name, and the URL on the
-    following line. The resulting list of entries is sorted by display name.
-
-    Args:
-        m3u8_text (str): The full text content of the M3U8 playlist.
-
-    Returns:
-        list[dict]: A sorted list of dictionaries, where each dictionary
-                    represents a channel and contains keys like 'duration',
-                    'display_name', 'channel_uri', 'tvg-id', etc.
-    """
     lines = m3u8_text.strip().splitlines()
     result = []
     i = 0
     while i < len(lines):
         line = lines[i].strip()
         if line.startswith('#EXTINF:'):
-            # Parse duration and attributes
             extinf = line[8:]
-            # Split duration and rest
             if ' ' in extinf:
                 duration, rest = extinf.split(' ', 1)
             else:
                 duration, rest = extinf, ''
             duration = float(duration)
-            # Parse attributes (key="value")
             attr_pattern = r'(\w+?)="([^"]*?)"'
             attrs = dict(re.findall(attr_pattern, rest))
-            # Parse display_name (after last comma)
-            display_name = rest.split(',', 1)[-1].strip() if ',' in rest else ''
-            # Next line is the URL
-            uri = ''
+            name = rest.split(',', 1)[-1].strip() if ',' in rest else ''
+            url = ''
             if i + 1 < len(lines):
-                uri = lines[i + 1].strip()
-            if display_name.startswith('Pluto TV'):
-                display_name = display_name.replace('Pluto TV', '', 1).strip()
-            entry = {'duration': duration, 'display_name': display_name, 'channel_uri': uri}
-            # Add known attribute keys explicitly
+                url = lines[i + 1].strip()
+            if name.startswith('Pluto TV'):
+                name = name.replace('Pluto TV', '', 1).strip()
+            entry = {'duration': duration, 'name': name, 'url': url}
             for key in ("tvg-id", "tvg-logo", "group-title"):
                 if key in attrs:
                     entry[key] = attrs[key]
@@ -75,7 +86,5 @@ def parse_m3u8_entry(m3u8_text: str) -> list[dict]:
             i += 2
         else:
             i += 1
-
-        # Sort channels by display_name (case-insensitive, None last)
-        result.sort(key=lambda c: (c['display_name'] is None, (c['display_name'] or '').lower()))
+    result.sort(key=lambda c: (c['name'] is None, (c['name'] or '').lower()))
     return result

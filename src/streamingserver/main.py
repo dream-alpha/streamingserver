@@ -22,6 +22,7 @@ import argparse
 
 from socket_server import RecorderCommandHandler, RecorderSocketServer
 from hls_playlist_utils import get_master_playlist, get_playlist, different_uris
+from ffmpeg_utils import close_ffmpeg_process, open_ffmpeg_process, terminate_ffmpeg_process, write_ffmpeg_segment
 from ts_utils import shift_segment, is_valid_ts_segment, set_discontinuity_segment, update_continuity_counters
 from hls_playlist import HLSPlaylistProcessor
 from segment_utils import get_segment_properties, append_to_rec_file, download_segment
@@ -62,19 +63,6 @@ class HLS_Recorder:
     def record_stream(self, channel_uri, rec_file):
         """
         The main recording loop for an HLS stream.
-
-        This method continuously fetches the media playlist, processes new segments,
-        and appends them to the recording file. It handles stream discontinuities,
-        resolution changes, and timestamp adjustments to ensure a smooth output file.
-
-        Args:
-            channel_uri (str): The master playlist URL for the HLS stream.
-            rec_file (str): The base path for the recording output file. Sections
-                            of the recording will be saved with a suffix (e.g., `_0.ts`).
-
-        Returns:
-            bool: True if the recording stopped gracefully, False if an unhandled
-                  exception occurred.
         """
         logger.info("channel_uri: %s, rec_file: %s", channel_uri, rec_file)
         segment_index = 0
@@ -86,17 +74,18 @@ class HLS_Recorder:
         current_resolution = None
         previous_resolution = None
         offset = 0
-        continuous_pts = 0  # Continuous timeline for playback (never goes backwards)
+        continuous_pts = 0
         empty_playlist_count = 0
         max_empty_playlists = 5
         failed_playlist_count = 0
         max_failed_playlists = 5
-        cc_map = {}  # Map to track CC
+        cc_map = {}
         monotonize_segment = False
         reload_master_playlist = True
         media_playlist_url = None
         discontinuity = False
         section_file = None
+        ffmpeg_proc = None
 
         self.playlist_processor = HLSPlaylistProcessor()
 
@@ -129,7 +118,7 @@ class HLS_Recorder:
                         continue
                     time.sleep(1)
                     continue
-                empty_playlist_count = 0  # Reset on success
+                empty_playlist_count = 0
 
                 logger.debug("Segment list has %s new segments", len(segment_list))
                 for segment in segment_list:
@@ -154,14 +143,11 @@ class HLS_Recorder:
                         logger.error("Failed to download segment or invalid ts segment %s", segment_index)
                         continue
 
-                    current_resolution, current_duration, current_pts, vpids, apids = get_segment_properties(segment_data)
-                    apid = apids[0] if apids else None
-                    vpid = vpids[0] if vpids else None
+                    current_resolution, current_duration, current_pts, _vpids, _apids = get_segment_properties(segment_data)
 
                     if current_pts is None:
                         raise ValueError(f"No PTS found in segment {segment_index}")
 
-                    # Check if segment URI has changed
                     if different_uris(previous_uri, segment.uri):
                         logger.info("Prev URI: %s", previous_uri)
                         logger.info(">" * 70)
@@ -170,19 +156,23 @@ class HLS_Recorder:
                             logger.info("Changing resolution: %s > %s", previous_resolution, current_resolution)
                             monotonize_segment = current_resolution not in ["1920x1080", "1280x720"]
                             new_section = True
-                            discontinuity = True
+                            # discontinuity = True
                         else:
-                            discontinuity = True
+                            new_section = True
+                            # discontinuity = True
 
                     if new_section:
-                        # Start a new section
+                        close_ffmpeg_process(ffmpeg_proc, section_index)
+
                         segment_index = 0
                         section_index += 1
-                        continuous_pts = current_pts  # Start continuous PTS from first segment
+                        continuous_pts = current_pts
                         offset = 0
                         cc_map = {}
+                        section_file = f"{os.path.splitext(rec_file)[0]}_{section_index}.ts"
+
+                        ffmpeg_proc = open_ffmpeg_process(section_file, section_index)
                     else:
-                        # Continue section
                         continuous_pts += previous_duration
                         offset = continuous_pts - current_pts
 
@@ -195,16 +185,15 @@ class HLS_Recorder:
                     if segment.discontinuity:
                         logger.info("Discontinuity found in segment %s", segment_index)
 
-                    if discontinuity or segment.discontinuity:
-                        # Handle discontinuity
+                    if discontinuity:  # or segment.discontinuity:
                         segment_data = set_discontinuity_segment(segment_data)
 
-                    # ready to append segment data to file
-                    section_file = f"{os.path.splitext(rec_file)[0]}_{section_index}.ts"
-                    append_to_rec_file(section_file, segment_data, org_segment_data, segment.uri, segment_index)
+                    if ffmpeg_proc:
+                        write_ffmpeg_segment(ffmpeg_proc, segment_data)
+                    else:
+                        append_to_rec_file(section_file, segment_data, org_segment_data, segment.uri, segment_index)
 
                     if section_index == 0 and segment_index == 5:
-                        # send recording start message to client
                         if hasattr(self, 'socketserver'):
                             self.socketserver.broadcast({"command": "start", "args": [self.channel_uri, section_file]})
 
@@ -216,16 +205,14 @@ class HLS_Recorder:
 
         except KeyboardInterrupt:
             logger.info("⚠ Recording interrupted by user")
-            return True
         except Exception as e:
             logger.error("❌ Recording error: %s", e)
             self.socketserver.broadcast({"command": "stop", "args": ["error", self.channel_uri, rec_file]})
             traceback.print_exc()
-            return False
         finally:
+            terminate_ffmpeg_process(ffmpeg_proc)
             self.is_running = False
             logger.info("✓ Recording stopped")
-        return True
 
     def start(self, channel_uri, rec_file):
         """
