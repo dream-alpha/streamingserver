@@ -44,16 +44,11 @@ def write_ffmpeg_segment(ffmpeg_proc, segment_data, rec_file, current_uri, segme
         with open(log_file, 'a', encoding="utf-8") as log_f:
             log_f.write(f"{segment_index}: {uri_name}\n")
 
-
 def terminate_ffmpeg_process(ffmpeg_proc):
     if ffmpeg_proc is not None:
         try:
-            ffmpeg_proc.terminate()
-            try:
-                ffmpeg_proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                ffmpeg_proc.kill()
-                ffmpeg_proc.communicate()
+            ffmpeg_proc.kill()
+            ffmpeg_proc.wait(timeout=5)
             logger.info("Terminated ffmpeg process.")
         except Exception as e:
             logger.error("Error terminating ffmpeg process: %s", e)

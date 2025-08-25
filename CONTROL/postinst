@@ -22,18 +22,14 @@ chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.prerm
 echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
 chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
 
-if [ ! -f /usr/bin/ffmpeg ]; then
-    cd /data
-    url=https://github.com/dream-alpha/streamingserver/releases/download/7.0.2/ffmpeg-release-$arch-static.tar.xz
-    wget $url -O ffmpeg-7.0.2-$arch-static.tar.xz
-    tar -xvf ffmpeg-7.0.2-$arch-static.tar.xz
+cd /data
+url=https://github.com/dream-alpha/streamingserver/releases/download/7.0.2/ffmpeg-release-$arch-static.tar.xz
+wget $url -O ffmpeg-7.0.2-$arch-static.tar.xz
+tar -xvf ffmpeg-7.0.2-$arch-static.tar.xz
 
-    cp /data/ffmpeg-7.0.2-$arch-static/ffmpeg $CHROOT_DIR/usr/bin
-    cp /data/ffmpeg-7.0.2-$arch-static/ffprobe $CHROOT_DIR/usr/bin
-    rm -rf /data/ffmpeg-7.0.2-$arch-static
-else
-    echo "/usr/bin/ffmpeg alleady exists"
-fi
+cp /data/ffmpeg-7.0.2-$arch-static/ffmpeg $CHROOT_DIR/usr/bin
+cp /data/ffmpeg-7.0.2-$arch-static/ffprobe $CHROOT_DIR/usr/bin
+rm -rf /data/ffmpeg-7.0.2-$arch-static
 
 $CHROOT_DIR/root/mount_chroot
 chroot "$CHROOT_DIR" /bin/bash -c "

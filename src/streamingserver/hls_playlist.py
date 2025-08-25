@@ -8,6 +8,13 @@ MAX_DEDUP_WINDOW_SIZE = 500  # Arbitrary limit for deduplication window size
 
 
 class HLSPlaylistProcessor:
+    @staticmethod
+    def _dedup_key(uri):
+        # Extract path and query from URI, ignore scheme and hostname
+        from urllib.parse import urlparse
+        parsed = urlparse(uri)
+        # Include path and query (if any)
+        return parsed.path + (('?' + parsed.query) if parsed.query else '')
     def __init__(self):
         self.last_playlist = []  # list of (seq, uri)
         self.dedup_window = deque(
@@ -216,9 +223,10 @@ class HLSPlaylistProcessor:
     def diff_playlist(self, new_playlist):
         diff = []
         for segment in new_playlist:
-            if segment.uri not in self.dedup_window:
+            key = self._dedup_key(segment.uri)
+            if key not in self.dedup_window:
                 diff.append(segment)
-                self.dedup_window.append(segment.uri)
+                self.dedup_window.append(key)
         return diff
 
     def process(self, playlist_lines):
@@ -287,16 +295,19 @@ class HLSPlaylistProcessor:
                 self.dedup_window.clear()
                 dedup_was_cleared = True
         self.last_target_duration = self.target_duration
+
         if dedup_was_cleared:
             for segment in new_playlist:
-                if segment.uri not in self.dedup_window:
-                    self.dedup_window.append(segment.uri)
+                key = self._dedup_key(segment.uri)
+                if key not in self.dedup_window:
+                    self.dedup_window.append(key)
 
         if not self.last_playlist:
             result = list(new_playlist)
             for segment in new_playlist:
-                if segment.uri not in self.dedup_window:
-                    self.dedup_window.append(segment.uri)
+                key = self._dedup_key(segment.uri)
+                if key not in self.dedup_window:
+                    self.dedup_window.append(key)
         else:
             diff = self.diff_playlist(new_playlist)
             result = list(diff)

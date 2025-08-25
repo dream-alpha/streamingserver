@@ -143,14 +143,13 @@ def different_uris(uri1, uri2):
     parsed2 = urlparse(uri2)
 
     # Extract host (netloc)
-    host1 = parsed1.netloc
-    host2 = parsed2.netloc
+    # host1 = parsed1.netloc
+    # host2 = parsed2.netloc
 
-    # Get first directory component from path
-    path_parts1 = parsed1.path.strip('/').split('/')
-    path_parts2 = parsed2.path.strip('/').split('/')
-    first_dir1 = path_parts1[0] if path_parts1 and path_parts1[0] else ''
-    first_dir2 = path_parts2[0] if path_parts2 and path_parts2[0] else ''
+    # Extract directory path (excluding filename)
+    import os
+    dir1 = os.path.dirname(parsed1.path)
+    dir2 = os.path.dirname(parsed2.path)
 
-    # Different if hosts are different OR if hosts are same but first directory components are different
-    return host1 != host2 or (host1 == host2 and first_dir1 != first_dir2)
+    # Different if hosts are different OR if hosts are same but directory paths are different
+    return dir1 != dir2

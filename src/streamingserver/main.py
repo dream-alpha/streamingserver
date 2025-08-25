@@ -76,7 +76,7 @@ class HLS_Recorder:
         offset = 0
         continuous_pts = 0
         empty_playlist_count = 0
-        max_empty_playlists = 5
+        max_empty_playlists = 10
         failed_playlist_count = 0
         max_failed_playlists = 5
         cc_map = {}
@@ -87,7 +87,9 @@ class HLS_Recorder:
         section_file = None
         ffmpeg_proc = None
 
-        self.playlist_processor = HLSPlaylistProcessor()
+        # Only initialize the playlist processor once, so deduplication cache is preserved across master playlist reloads
+        if self.playlist_processor is None:
+            self.playlist_processor = HLSPlaylistProcessor()
 
         try:
             while not self._stop_event.is_set():
@@ -122,9 +124,9 @@ class HLS_Recorder:
 
                 logger.debug("Segment list has %s new segments", len(segment_list))
                 for segment in segment_list:
-                    logger.info("Segment URI list 1: %s: %s", segment_index, segment.uri)
-                    logger.debug("Segment URI list 2: %s: %s", segment_index, segment.key_info.get('METHOD', 'none') if segment.key_info else 'none')
-                    logger.debug("Segment URI list 3: %s: %s", segment_index, segment.duration)
+                    logger.info("Segment list 1: %s: %s", segment_index, segment.uri)
+                    logger.debug("Segment list 2: %s: %s", segment_index, segment.key_info.get('METHOD', 'none') if segment.key_info else 'none')
+                    logger.debug("Segment list 3: %s: %s", segment_index, segment.duration)
                     if self._stop_event.is_set():
                         logger.info("Recording stopped by user")
                         break
@@ -185,7 +187,7 @@ class HLS_Recorder:
                     if segment.discontinuity:
                         logger.info("Discontinuity found in segment %s", segment_index)
 
-                    if discontinuity:  # or segment.discontinuity:
+                    if discontinuity or segment.discontinuity:
                         segment_data = set_discontinuity_segment(segment_data)
 
                     if ffmpeg_proc:
