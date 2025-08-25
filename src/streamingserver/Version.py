@@ -20,6 +20,6 @@
 
 PLUGIN = "streamingserver"
 ID = "STS"
-VERSION = "0.8.3"
+VERSION = "0.9.1"
 COPYRIGHT = "2018-2025 by dream-alpha"
 LICENSE = "This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version."

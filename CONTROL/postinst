@@ -1,5 +1,13 @@
 #!/bin/sh
 set -e
+model=$(cat /proc/stb/info/model)
+echo model: $model
+if [ $model = "one" ] || [ $model = "two" ]; then
+	arch="arm64"
+else
+	arch="armhf"
+fi
+
 CHROOT_DIR=/data/ubuntu
 ENIGMA2_DIR=/usr/lib/enigma2/python/Plugins/Ubuntu/streamingserver
 UBUNTU_DIR=$CHROOT_DIR/root/plugins/streamingserver
@@ -14,12 +22,24 @@ chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.prerm
 echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
 chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
 
+if [ ! -f /usr/bin/ffmpeg ]; then
+    cd /data
+    url=https://github.com/dream-alpha/streamingserver/releases/download/7.0.2/ffmpeg-release-$arch-static.tar.xz
+    wget $url -O ffmpeg-7.0.2-$arch-static.tar.xz
+    tar -xvf ffmpeg-7.0.2-$arch-static.tar.xz
+
+    cp /data/ffmpeg-7.0.2-$arch-static/ffmpeg $CHROOT_DIR/usr/bin
+    cp /data/ffmpeg-7.0.2-$arch-static/ffprobe $CHROOT_DIR/usr/bin
+    rm -rf /data/ffmpeg-7.0.2-$arch-static
+else
+    echo "/usr/bin/ffmpeg alleady exists"
+fi
+
 $CHROOT_DIR/root/mount_chroot
 chroot "$CHROOT_DIR" /bin/bash -c "
     dpkg --configure -a
 
     echo '[*] Updating plugin packages...'
-    apt install -y ffmpeg
     /root/venv/bin/pip install -r /root/plugins/streamingserver/requirements.txt
 "
 $CHROOT_DIR/root/umount_chroot

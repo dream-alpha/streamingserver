@@ -154,7 +154,7 @@ class HLSPlaylistProcessor:
                     logger.debug("Tag: Low-latency segment related tag: %s", tag)
                 case "#EXT-X-BYTERANGE":
                     byte_range = line
-                    logger.debug("Tag: BYTERANGE = %s", byte_range)
+                    logger.info("Tag: BYTERANGE = %s", byte_range)
                 case "#EXT-X-PROGRAM-DATE-TIME":
                     logger.debug("Tag: PROGRAM-DATE-TIME = %s", line.split(":", 1)[1])
                 case "#EXT-X-CUE-OUT" | "#EXT-X-CUE-IN":

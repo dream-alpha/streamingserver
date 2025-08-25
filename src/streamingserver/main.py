@@ -189,7 +189,7 @@ class HLS_Recorder:
                         segment_data = set_discontinuity_segment(segment_data)
 
                     if ffmpeg_proc:
-                        write_ffmpeg_segment(ffmpeg_proc, segment_data)
+                        write_ffmpeg_segment(ffmpeg_proc, segment_data, section_file, segment.uri, segment_index)
                     else:
                         append_to_rec_file(section_file, segment_data, org_segment_data, segment.uri, segment_index)
 
