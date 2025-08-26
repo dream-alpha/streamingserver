@@ -7,7 +7,7 @@ from debug import get_logger
 logger = get_logger(__file__)
 
 
-class RecorderCommandHandler(socketserver.BaseRequestHandler):
+class CommandHandler(socketserver.BaseRequestHandler):
     def handle(self):
         logger.debug("Connection established with %s", self.client_address)
 
@@ -52,7 +52,7 @@ class RecorderCommandHandler(socketserver.BaseRequestHandler):
             logger.debug("❌ Connection error: %s", e)
 
 
-class RecorderSocketServer(socketserver.ThreadingTCPServer):
+class SocketServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, server_address, handler_class, recorder):

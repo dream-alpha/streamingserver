@@ -1,4 +1,3 @@
-import os
 import subprocess
 from debug import get_logger
 
@@ -29,11 +28,7 @@ def close_ffmpeg_process(ffmpeg_proc, section_index):
             logger.error("Error closing ffmpeg process: %s", e)
 
 
-def write_ffmpeg_segment(ffmpeg_proc, segment_data, rec_file, current_uri, segment_index):
-    log_file = os.path.splitext(rec_file)[0] + '.log'
-    uri_name = os.path.basename(current_uri)
-    # pkt_file = os.path.splitext(rec_file)[0] + f"_{segment_index}.ts"
-
+def write_ffmpeg_segment(ffmpeg_proc, segment_data):
     if ffmpeg_proc is not None and ffmpeg_proc.stdin:
         try:
             ffmpeg_proc.stdin.write(segment_data)
@@ -41,8 +36,6 @@ def write_ffmpeg_segment(ffmpeg_proc, segment_data, rec_file, current_uri, segme
         except Exception as e:
             logger.error("Error writing segment to ffmpeg stdin: %s", e)
 
-        with open(log_file, 'a', encoding="utf-8") as log_f:
-            log_f.write(f"{segment_index}: {uri_name}\n")
 
 def terminate_ffmpeg_process(ffmpeg_proc):
     if ffmpeg_proc is not None:

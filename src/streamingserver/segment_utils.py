@@ -6,6 +6,7 @@ HLS (HTTP Live Streaming) segments. It includes capabilities for downloading,
 decrypting, validating, processing (e.g., scaling), and analyzing media segments.
 These functions are essential components of the HLS recording and processing pipeline.
 """
+
 from __future__ import annotations
 import os
 import time
@@ -15,7 +16,7 @@ import tempfile
 import requests
 
 from crypt_utils import decrypt_segment, get_encryption_info
-from ts_utils import is_valid_ts_segment, update_continuity_counters, make_pat, make_pmt, make_eos_ts_packet
+from ts_utils import is_valid_ts_segment
 from debug import get_logger
 
 logger = get_logger(__file__)
@@ -77,31 +78,9 @@ def download_segment(
     return None
 
 
-def append_eof_segment_to_rec_file(section_file: str, vpid: int, apid: int, segment_index: int, cc_map: dict) -> None:
-    """
-    Appends an EOF segment to the specified recording file.
-
-    Args:
-        section_file: The path to the section recording file.
-        vpid: The video PID.
-        apid: The audio PID.
-        segment_index: The index of the segment.
-        cc_map: The continuity counter map.
-    """
-
-    pat = make_pat(vpid)
-    pmt = make_pmt(vpid, video_pid=vpid, audio_pid=apid)
-    video_eos = make_eos_ts_packet(vpid, 0xE0)
-    audio_eos = make_eos_ts_packet(apid, 0xC0)
-    eof_segment = pat + pmt + video_eos + audio_eos
-    eof_segment, cc_map = update_continuity_counters(eof_segment, cc_map)
-    append_to_rec_file(section_file, eof_segment, eof_segment, "eof-filler.ts", segment_index)
-
-
 def append_to_rec_file(
     rec_file: str,
     segment_data: bytes,
-    org_segment_data: bytes,
     current_uri: str,
     segment_index: int
 ) -> None:
@@ -117,18 +96,11 @@ def append_to_rec_file(
     Args:
         rec_file: The path to the main recording file.
         segment_data: The processed binary segment data to append.
-        org_segment_data: The original, unprocessed segment data for debugging.
         current_uri: The URI of the segment, used for logging.
         segment_index: The index of the segment, used for logging and filenames.
     """
 
-    # Remove unwanted PIDs (e.g., SCTE-35, ID3) from the segment data
-    # segment_data = remove_pids(segment_data, [0x1f6, 0x1f4])
-
-    log_file = os.path.splitext(rec_file)[0] + '.log'
     uri_name = os.path.basename(current_uri)
-    pkt_file = os.path.splitext(rec_file)[0] + f"_{segment_index}.ts"
-    org_pkt_file = os.path.splitext(rec_file)[0] + f"_{segment_index}_org.ts"
     try:
         if not is_valid_ts_segment(segment_data):
             logger.error("✗ Invalid TS segment data for %s", current_uri)
@@ -136,16 +108,6 @@ def append_to_rec_file(
         with open(rec_file, 'ab') as rec_f:
             rec_f.write(segment_data)
             rec_f.flush()
-
-        with open(log_file, 'a', encoding="utf-8") as log_f:
-            log_f.write(f"{segment_index}: {uri_name}\n")
-
-        if False:
-            with open(pkt_file, 'wb') as pkt_f:
-                pkt_f.write(segment_data)
-
-            with open(org_pkt_file, 'wb') as org_pkt_f:
-                org_pkt_f.write(org_segment_data)
 
         # Log segment info
         file_size = os.path.getsize(rec_file) / (1024 * 1024)
@@ -155,81 +117,6 @@ def append_to_rec_file(
 
     except Exception as e:
         logger.error("❌ Error appending to output file: %s", e)
-
-
-def scale_segment(
-    segment_data: bytes,
-    resolution: tuple[int, int],
-    vid_pid: int,
-    aud_pid: int
-) -> bytes:
-    """
-    Scales a MPEG-TS segment using FFmpeg and remaps PIDs.
-
-    This function takes raw MPEG-TS segment data, scales the video stream to the
-    specified resolution, and re-maps the video and audio Packet IDs (PIDs).
-    It uses the H.264 High profile for better encoding quality. The audio
-    stream is copied without re-encoding.
-
-    Args:
-        segment_data: The raw bytes of the input MPEG-TS segment.
-        resolution: A tuple (width, height) for the target video resolution.
-        vid_pid: The new PID for the video stream.
-        aud_pid: The new PID for the audio stream.
-
-    Returns:
-        The processed MPEG-TS segment data as bytes.
-
-    Raises:
-        RuntimeError: If the FFmpeg process fails.
-    """
-    width, height = resolution
-
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",  # keep only errors in stderr
-        "-y",
-        "-f", "mpegts",        # input format
-        "-i", "pipe:0",        # read from stdin
-        "-vf", f"scale={width}:{height}",
-        "-map", "0:v:0",
-        "-map", "0:a:0",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-
-        # Force High profile with all necessary settings
-        "-profile:v", "high",            # High profile
-        "-level:v", "4.1",               # Level 4.1 (supports 1080p at 30fps)
-        "-x264-params", "profile=high",  # Redundant but ensures x264 gets it
-        "-b_strategy", "1",              # Enable B-frames (not in Baseline)
-        "-bf", "3",                      # Use up to 3 B-frames between I and P frames
-        "-flags", "+cgop",               # Closed GOP, better seeking
-        "-coder", "1",                   # CABAC entropy coding (not in Baseline)
-        "-8x8dct", "1",                  # Enable 8x8 transform (High profile feature)
-        "-partitions", "i8x8,i4x4,p8x8,b8x8",  # Use all partition types
-
-        "-crf", "23",
-        "-c:a", "copy",
-        "-f", "mpegts",
-        "-streamid", f"0:{vid_pid}",
-        "-streamid", f"1:{aud_pid}",
-        "pipe:1"                         # write to stdout
-    ]
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=segment_data,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True
-        )
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode(errors="replace") if e.stderr else "<no stderr>"
-        raise RuntimeError(f"ffmpeg failed (exit {e.returncode}):\n{stderr}") from e
-
-    return proc.stdout
 
 
 def is_filler_segment(uri: str) -> bool:

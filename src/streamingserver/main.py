@@ -20,12 +20,13 @@ import glob
 import subprocess
 import argparse
 
-from socket_server import RecorderCommandHandler, RecorderSocketServer
+from socket_server import CommandHandler, SocketServer
 from hls_playlist_utils import get_master_playlist, get_playlist, different_uris
 from ffmpeg_utils import close_ffmpeg_process, open_ffmpeg_process, terminate_ffmpeg_process, write_ffmpeg_segment
+from log_utils import write_log
 from ts_utils import shift_segment, is_valid_ts_segment, set_discontinuity_segment, update_continuity_counters
 from hls_playlist import HLSPlaylistProcessor
-from segment_utils import get_segment_properties, append_to_rec_file, download_segment
+from segment_utils import get_segment_properties, download_segment
 from session_utils import get_session
 from debug import get_logger
 
@@ -46,7 +47,7 @@ class HLS_Recorder:
         is_running (bool): True if a recording is currently active.
         _stop_event (threading.Event): Event used to signal the recording loop to stop.
         channel_uri (str): The URI of the HLS stream being recorded.
-        socketserver (RecorderSocketServer): A reference to the command server.
+        socketserver (SocketServer): A reference to the command server.
         playlist_processor (HLSPlaylistProcessor): The processor for parsing and diffing playlists.
         session (requests.Session): The session object for making HTTP requests.
     """
@@ -87,7 +88,6 @@ class HLS_Recorder:
         section_file = None
         ffmpeg_proc = None
 
-        # Only initialize the playlist processor once, so deduplication cache is preserved across master playlist reloads
         if self.playlist_processor is None:
             self.playlist_processor = HLSPlaylistProcessor()
 
@@ -139,7 +139,7 @@ class HLS_Recorder:
                     discontinuity = False
 
                     segment_data = download_segment(self.session, segment.uri, segment_index, segment.key_info, max_retries=10, timeout=10)
-                    org_segment_data = segment_data
+                    # org_segment_data = segment_data
 
                     if not segment_data or not is_valid_ts_segment(segment_data):
                         logger.error("Failed to download segment or invalid ts segment %s", segment_index)
@@ -164,6 +164,7 @@ class HLS_Recorder:
                             # discontinuity = True
 
                     if new_section:
+                        write_log(section_file if section_file else "none", segment.uri, section_index, segment_index, msg="new-section\n")
                         close_ffmpeg_process(ffmpeg_proc, section_index)
 
                         segment_index = 0
@@ -186,14 +187,16 @@ class HLS_Recorder:
 
                     if segment.discontinuity:
                         logger.info("Discontinuity found in segment %s", segment_index)
+                        write_log(section_file, segment.uri, section_index, segment_index, msg="discontinuity")
 
                     if discontinuity or segment.discontinuity:
                         segment_data = set_discontinuity_segment(segment_data)
 
                     if ffmpeg_proc:
-                        write_ffmpeg_segment(ffmpeg_proc, segment_data, section_file, segment.uri, segment_index)
+                        write_ffmpeg_segment(ffmpeg_proc, segment_data)
+                        write_log(section_file, segment.uri, section_index, segment_index, msg="write segment")
                     else:
-                        append_to_rec_file(section_file, segment_data, org_segment_data, segment.uri, segment_index)
+                        logger.error("No ffmpeg process available to write segment %s", segment_index)
 
                     if section_index == 0 and segment_index == 5:
                         if hasattr(self, 'socketserver'):
@@ -283,7 +286,7 @@ def main():
     try:
         # Start socket server in background thread
         HOST, PORT = "0.0.0.0", 5000
-        socketserver = RecorderSocketServer((HOST, PORT), RecorderCommandHandler, recorder)
+        socketserver = SocketServer((HOST, PORT), CommandHandler, recorder)
         recorder.socketserver = socketserver
         socketserver_thread = threading.Thread(target=socketserver.serve_forever, daemon=True)
         socketserver_thread.start()

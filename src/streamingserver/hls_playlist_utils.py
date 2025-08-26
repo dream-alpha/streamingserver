@@ -7,6 +7,8 @@ select the best quality stream, fetch media playlists, and parse HLS attribute
 strings. It also contains a utility to compare URIs to detect changes in the
 stream's source.
 """
+
+import os
 import re
 from urllib.parse import urljoin
 from urllib.parse import urlparse
@@ -122,18 +124,18 @@ def parse_attributes(attr_str):
 
 def different_uris(uri1, uri2):
     """
-    Compares two URIs to determine if they point to different stream sources.
+    Compares two URIs to determine if they point to different stream sources based on directory path.
 
-    URIs are considered different if their hostnames are different, or if their
-    hostnames are the same but their first path components are different. This
-    helps in detecting when a stream switches to a different CDN or server.
+    URIs are considered different if the directory path (the part between the host and the filename)
+    is different, regardless of the host. This helps in detecting when a stream switches to a different
+    content path, even if served from different CDNs or hosts.
 
     Args:
         uri1 (str): The first URI to compare.
         uri2 (str): The second URI to compare.
 
     Returns:
-        bool: True if the URIs are considered different, False otherwise.
+        bool: True if the directory paths are different, False otherwise.
     """
     if not uri1 or not uri2:
         return True  # If either is None, consider them different
@@ -147,9 +149,8 @@ def different_uris(uri1, uri2):
     # host2 = parsed2.netloc
 
     # Extract directory path (excluding filename)
-    import os
     dir1 = os.path.dirname(parsed1.path)
     dir2 = os.path.dirname(parsed2.path)
 
-    # Different if hosts are different OR if hosts are same but directory paths are different
+    # Different if directory paths are different
     return dir1 != dir2

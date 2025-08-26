@@ -1,4 +1,5 @@
 from collections import deque
+from urllib.parse import urlparse
 from debug import get_logger
 from hls_segment import HLSSegment
 
@@ -11,10 +12,10 @@ class HLSPlaylistProcessor:
     @staticmethod
     def _dedup_key(uri):
         # Extract path and query from URI, ignore scheme and hostname
-        from urllib.parse import urlparse
         parsed = urlparse(uri)
         # Include path and query (if any)
         return parsed.path + (('?' + parsed.query) if parsed.query else '')
+
     def __init__(self):
         self.last_playlist = []  # list of (seq, uri)
         self.dedup_window = deque(
