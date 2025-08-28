@@ -36,7 +36,8 @@ class CommandHandler(socketserver.BaseRequestHandler):
                         args = req.get("args", [])
                         channel_uri = args[0]
                         rec_file = args[1]
-                        self.server.recorder.start(channel_uri, rec_file)
+                        show_ads = args[2] if len(args) > 2 else False
+                        self.server.recorder.start(channel_uri, rec_file, show_ads)
                     elif cmd == "stop":
                         self.server.recorder.stop()
                     elif cmd == "get_playlist":

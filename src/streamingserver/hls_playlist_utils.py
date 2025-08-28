@@ -86,10 +86,7 @@ def get_playlist(session, playlist_url):
         str | None: The text content of the playlist, or None if the request fails.
     """
     try:
-        response = session.get(playlist_url, timeout=30)
-        if response.status_code != 200:
-            logger.debug("⚠ Failed to fetch playlist: HTTP %s", response.status_code)
-            return None
+        response = session.get(playlist_url, timeout=5)
         logger.debug("📜 Fetched playlist (%s bytes)", len(response.text))
     except Exception as e:
         logger.debug("❌ Error fetching playlist: %s", e)

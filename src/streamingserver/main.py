@@ -67,6 +67,7 @@ class HLS_Recorder:
         """
         logger.info("channel_uri: %s, rec_file: %s", channel_uri, rec_file)
         segment_index = 0
+        cumulative_segment_index = 0
         section_index = -1
         self.is_running = True
         previous_uri = None
@@ -85,7 +86,7 @@ class HLS_Recorder:
         reload_master_playlist = True
         media_playlist_url = None
         discontinuity = False
-        section_file = None
+        section_file = os.path.splitext(rec_file)[0] + "_0.ts"
         ffmpeg_proc = None
 
         if self.playlist_processor is None:
@@ -97,6 +98,7 @@ class HLS_Recorder:
                     self.session = get_session()
                     media_playlist_url = get_master_playlist(self.session, channel_uri)
                     reload_master_playlist = False
+                    write_log(section_file, "none", section_index, segment_index, msg="load-master-playlist")
 
                 playlist = get_playlist(self.session, media_playlist_url)
                 if not playlist:
@@ -158,13 +160,13 @@ class HLS_Recorder:
                             logger.info("Changing resolution: %s > %s", previous_resolution, current_resolution)
                             monotonize_segment = current_resolution not in ["1920x1080", "1280x720"]
                             new_section = True
-                            # discontinuity = True
+                            discontinuity = True
                         else:
                             new_section = True
-                            # discontinuity = True
+                            discontinuity = True
 
                     if new_section:
-                        write_log(section_file if section_file else "none", segment.uri, section_index, segment_index, msg="new-section\n")
+                        write_log(section_file, segment.uri, section_index, segment_index, msg="new-section\n")
                         close_ffmpeg_process(ffmpeg_proc, section_index)
 
                         segment_index = 0
@@ -198,11 +200,12 @@ class HLS_Recorder:
                     else:
                         logger.error("No ffmpeg process available to write segment %s", segment_index)
 
-                    if section_index == 0 and segment_index == 5:
+                    if cumulative_segment_index == 5:
                         if hasattr(self, 'socketserver'):
                             self.socketserver.broadcast({"command": "start", "args": [self.channel_uri, section_file]})
 
                     segment_index += 1
+                    cumulative_segment_index += 1
                     previous_uri = segment.uri
                     previous_duration = current_duration
                     previous_pts = current_pts
@@ -219,7 +222,7 @@ class HLS_Recorder:
             self.is_running = False
             logger.info("✓ Recording stopped")
 
-    def start(self, channel_uri, rec_file):
+    def start(self, channel_uri, rec_file, show_ads=False):
         """
         Starts the recording process in a new thread.
 
@@ -235,17 +238,19 @@ class HLS_Recorder:
         logger.info("Starting HLS recording for channel: %s", channel_uri)
         logger.info("#" * 70)
         self.stop()
-        channel_id = ""
-        if channel_uri.startswith("http"):
-            # Extract channel_id from channel_uri using regex
-            match = re.search(r"/channel/([^/]+)/", channel_uri)
-            if match:
-                channel_id = match.group(1)
-                logger.debug("Extracted channel_id: %s", channel_id)
-        else:
-            channel_id = channel_uri
-        if channel_id:
-            channel_uri = f"http://stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{channel_id}/master.m3u8?deviceType=unknown&deviceMake=unknown&deviceModel=unknown&deviceVersion=unknown&appVersion=unknown&deviceLat=90&deviceLon=0&deviceDNT=TARGETOPT&deviceId=PSID&advertisingId=PSID&us_privacy=1YNY&profileLimit=&profileFloor=&embedPartner="
+
+        if not show_ads:
+            channel_id = ""
+            if channel_uri.startswith("http"):
+                # Extract channel_id from channel_uri using regex
+                match = re.search(r"/channel/([^/]+)/", channel_uri)
+                if match:
+                    channel_id = match.group(1)
+                    logger.debug("Extracted channel_id: %s", channel_id)
+            else:
+                channel_id = channel_uri
+            if channel_id:
+                channel_uri = f"http://stitcher-ipv4.pluto.tv/v1/stitch/embed/hls/channel/{channel_id}/master.m3u8?deviceType=unknown&deviceMake=unknown&deviceModel=unknown&deviceVersion=unknown&appVersion=unknown&deviceLat=90&deviceLon=0&deviceDNT=TARGETOPT&deviceId=PSID&advertisingId=PSID&us_privacy=1YNY&profileLimit=&profileFloor=&embedPartner="
         self.channel_uri = channel_uri
         logger.debug("📺 Using channel URI: %s", self.channel_uri)
 
@@ -279,6 +284,7 @@ def main():
     parser = argparse.ArgumentParser(description="HLS Recorder")
     parser.add_argument('--rec_file', type=str, default='pluto.ts', help='File name for recording file (default: pluto.ts)')
     parser.add_argument('--channel', type=str, help='Channel ID')
+    parser.add_argument('--show_ads', action='store_true', help='Whether to show ads (default: False)')
     args = parser.parse_args()
 
     recorder = HLS_Recorder()
@@ -294,7 +300,7 @@ def main():
         logger.debug("🚀 Ready for commands. Use 'start', 'stop' via socket.")
         if args.channel:
             logger.debug("Press Ctrl+C to exit.")
-            recorder.start(args.channel, args.rec_file)
+            recorder.start(args.channel, args.rec_file, args.show_ads)
         while True:
             time.sleep(1)
 
