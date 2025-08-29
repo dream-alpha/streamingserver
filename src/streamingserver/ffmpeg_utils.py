@@ -5,12 +5,19 @@ from debug import get_logger
 logger = get_logger(__file__)
 
 
+# Helper to build ffmpeg -map args for a single PID
+def _pid_to_map(pid):
+    if pid is not None:
+        return ["-map", f"0:p:{pid}"]
+    return []
+
 def open_ffmpeg_process(section_file, section_index):
     ffmpeg_cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-fflags", "+discardcorrupt+genpts+igndts+ignidx+nofillin",
         "-err_detect", "ignore_err",
         "-f", "mpegts", "-i", "-",
+        "-map", "0:v:0", "-map", "0:a:0",
         "-c", "copy", section_file
     ]
     ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)  # pylint: disable=consider-using-with

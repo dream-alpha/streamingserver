@@ -132,7 +132,7 @@ def is_filler_segment(uri: str) -> bool:
     Returns:
         True if the URI matches a known filler signature, False otherwise.
     """
-    filler_signatures = ["_plutotv_error_", "_plutotv_filler_", "Well_be_right_back_", "_ad/", "_ad_"]
+    filler_signatures = ["_plutotv_error_", "_plutotv_filler_"]
     return any(sig in uri for sig in filler_signatures)
 
 

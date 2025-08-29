@@ -9,6 +9,7 @@ MAX_DEDUP_WINDOW_SIZE = 500  # Arbitrary limit for deduplication window size
 
 
 class HLSPlaylistProcessor:
+
     @staticmethod
     def _dedup_key(uri):
         # Extract path and query from URI, ignore scheme and hostname
@@ -32,6 +33,13 @@ class HLSPlaylistProcessor:
         self.last_endlist_seen = False
         self.target_duration = None
         self.last_target_duration = None
+
+    def clear_deduplication(self):
+        """
+        Clear the deduplication window.
+        """
+        self.dedup_window.clear()
+        logger.debug("Deduplication window cleared by user request.")
 
     def count_extinf_tags(self, playlist_lines) -> int:
         # Handle case where playlist_lines is a single string

@@ -26,7 +26,7 @@ from ffmpeg_utils import close_ffmpeg_process, open_ffmpeg_process, terminate_ff
 from log_utils import write_log
 from ts_utils import shift_segment, is_valid_ts_segment, set_discontinuity_segment, update_continuity_counters
 from hls_playlist import HLSPlaylistProcessor
-from segment_utils import get_segment_properties, download_segment
+from segment_utils import append_to_rec_file, get_segment_properties, download_segment, is_filler_segment
 from session_utils import get_session
 from debug import get_logger
 
@@ -70,7 +70,7 @@ class HLS_Recorder:
         cumulative_segment_index = 0
         section_index = -1
         self.is_running = True
-        previous_uri = None
+        previous_uri = ""
         previous_duration = 0
         previous_pts = 0
         current_resolution = None
@@ -85,12 +85,11 @@ class HLS_Recorder:
         monotonize_segment = False
         reload_master_playlist = True
         media_playlist_url = None
-        discontinuity = False
         section_file = os.path.splitext(rec_file)[0] + "_0.ts"
         ffmpeg_proc = None
+        filler = False
 
-        if self.playlist_processor is None:
-            self.playlist_processor = HLSPlaylistProcessor()
+        self.playlist_processor = HLSPlaylistProcessor()
 
         try:
             while not self._stop_event.is_set():
@@ -138,7 +137,6 @@ class HLS_Recorder:
                         break
 
                     new_section = False
-                    discontinuity = False
 
                     segment_data = download_segment(self.session, segment.uri, segment_index, segment.key_info, max_retries=10, timeout=10)
                     # org_segment_data = segment_data
@@ -156,14 +154,12 @@ class HLS_Recorder:
                         logger.info("Prev URI: %s", previous_uri)
                         logger.info(">" * 70)
                         logger.info("Next URI: %s", segment.uri)
-                        if previous_resolution != current_resolution:
+                        filler = is_filler_segment(segment.uri)
+
+                        if previous_resolution != current_resolution or filler:
                             logger.info("Changing resolution: %s > %s", previous_resolution, current_resolution)
-                            monotonize_segment = current_resolution not in ["1920x1080", "1280x720"]
                             new_section = True
-                            discontinuity = True
-                        else:
-                            new_section = True
-                            discontinuity = True
+                        monotonize_segment = filler
 
                     if new_section:
                         write_log(section_file, segment.uri, section_index, segment_index, msg="new-section\n")
@@ -176,7 +172,8 @@ class HLS_Recorder:
                         cc_map = {}
                         section_file = f"{os.path.splitext(rec_file)[0]}_{section_index}.ts"
 
-                        ffmpeg_proc = open_ffmpeg_process(section_file, section_index)
+                        if not filler:
+                            ffmpeg_proc = open_ffmpeg_process(section_file, section_index)
                     else:
                         continuous_pts += previous_duration
                         offset = continuous_pts - current_pts
@@ -187,22 +184,20 @@ class HLS_Recorder:
                         segment_data = shift_segment(segment_data, offset)
                         segment_data, cc_map = update_continuity_counters(segment_data, cc_map)
 
-                    if segment.discontinuity:
+                    if filler and segment.discontinuity:
                         logger.info("Discontinuity found in segment %s", segment_index)
+                        segment_data = set_discontinuity_segment(segment_data)
                         write_log(section_file, segment.uri, section_index, segment_index, msg="discontinuity")
 
-                    if discontinuity or segment.discontinuity:
-                        segment_data = set_discontinuity_segment(segment_data)
-
-                    if ffmpeg_proc:
+                    if not filler:
                         write_ffmpeg_segment(ffmpeg_proc, segment_data)
-                        write_log(section_file, segment.uri, section_index, segment_index, msg="write segment")
+                        write_log(section_file, segment.uri, section_index, segment_index, msg="ffmpeg-segment")
                     else:
-                        logger.error("No ffmpeg process available to write segment %s", segment_index)
+                        append_to_rec_file(section_file, segment_data, segment.uri, segment_index)
+                        write_log(section_file, segment.uri, section_index, segment_index, msg="filler-segment")
 
-                    if cumulative_segment_index == 5:
-                        if hasattr(self, 'socketserver'):
-                            self.socketserver.broadcast({"command": "start", "args": [self.channel_uri, section_file]})
+                    if hasattr(self, 'socketserver'):
+                        self.socketserver.broadcast({"command": "start", "args": [self.channel_uri, section_file, cumulative_segment_index]})
 
                     segment_index += 1
                     cumulative_segment_index += 1
