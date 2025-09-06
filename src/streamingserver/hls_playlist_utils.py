@@ -51,7 +51,7 @@ def get_master_playlist(session, url):
             # Sort by bandwidth and get the best quality
             sorted_playlists = sorted(
                 master_playlist.playlists,
-                key=lambda p: p.stream_info.bandwidth if p.stream_info else 0
+                key=lambda p: p.stream_info.bandwidth if p.stream_info and p.stream_info.bandwidth is not None else 0
             )
 
             # Get highest quality

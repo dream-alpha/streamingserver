@@ -108,7 +108,7 @@ disable=
     cyclic-import,
     import-error,
     W0718,W1203,
-    E0611
+    E0611, E1131
 
 
 [REPORTS]
@@ -433,7 +433,7 @@ max-returns=20
 max-branches=50
 
 # Maximum number of statements in function / method body
-max-statements=150
+max-statements=200
 
 # Maximum number of parents for a class (see R0901).
 max-parents=7

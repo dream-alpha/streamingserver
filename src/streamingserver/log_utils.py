@@ -6,26 +6,24 @@ except Exception:
     from version import ID
 from datetime import datetime
 
+LOG_FILENAME = "pluto.log"
 
-def write_log(rec_file, current_uri, section_index, segment_index, msg="none"):
-    log_file = rec_file.split("_")[0] + ".log"
-    uri_name = os.path.basename(current_uri)
-
+def write_log(rec_dir, current_uri, section_index, segment_index, msg="none"):
+    log_file = rec_dir + "/" + LOG_FILENAME
     # Get current time in hh:mm:ss.milliseconds format
     now = datetime.now()
     ms = int(now.microsecond / 1000)
     timestamp = "%s.%03d" % (now.strftime("%H:%M:%S"), ms)
 
-    # Ensure section_index and segment_index are integers, else assign -1
     try:
-        section_index_int = int(section_index)
+        section_index = "%03d" % int(section_index)
     except (ValueError, TypeError):
-        section_index_int = -1
+        section_index = "---"
     try:
-        segment_index_int = int(segment_index)
+        segment_index = "%03d" % int(segment_index)
     except (ValueError, TypeError):
-        segment_index_int = -1
+        segment_index = "---"
 
     with open(log_file, 'a') as log_f:
-        log_f.write("%s %s %03d/%03d: %s - %s\n" % (timestamp, ID, section_index_int, segment_index_int, current_uri, msg))
+        log_f.write("%s %s %s/%s: %s - %s\n" % (timestamp, ID, section_index, segment_index, current_uri, msg))
         log_f.flush()

@@ -484,7 +484,7 @@ def read_pcr(ts_packet: bytes):
     return (pcr_base, pcr_ext)
 
 
-def write_pcr(ts_packet: bytes, new_pcr: int | tuple[int, int]) -> bytes:  # pylint: disable=unsupported-binary-operation
+def write_pcr(ts_packet: bytes, new_pcr: int | tuple[int, int]) -> bytes:
     """
     Writes a new PCR value into a TS packet's adaptation field.
 
