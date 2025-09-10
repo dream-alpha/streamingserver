@@ -1,0 +1,49 @@
+#!/bin/sh
+set -e
+model=$(cat /proc/stb/info/model)
+echo model: $model
+if [ $model = "one" ] || [ $model = "two" ]; then
+	arch="arm64"
+else
+	arch="armhf"
+fi
+
+CHROOT_DIR=/data/ubuntu
+ENIGMA2_DIR=/usr/lib/enigma2/python/Plugins/Ubuntu/streamingserver
+UBUNTU_DIR=$CHROOT_DIR/root/plugins/streamingserver
+mkdir -p $UBUNTU_DIR
+cp -avr $ENIGMA2_DIR/* $UBUNTU_DIR/
+
+# Disable systemd maintainer scripts BEFORE chroot and package config
+echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.postinst
+chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.postinst
+echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.prerm
+chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.prerm
+echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
+chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.postrm
+
+cd /data
+url=https://github.com/dream-alpha/streamingserver/releases/download/7.0.2/ffmpeg-release-$arch-static.tar.xz
+wget $url -O ffmpeg-7.0.2-$arch-static.tar.xz
+tar -xvf ffmpeg-7.0.2-$arch-static.tar.xz
+
+cp /data/ffmpeg-7.0.2-$arch-static/ffmpeg $CHROOT_DIR/usr/bin
+cp /data/ffmpeg-7.0.2-$arch-static/ffprobe $CHROOT_DIR/usr/bin
+rm -rf /data/ffmpeg-7.0.2-$arch-static
+
+$CHROOT_DIR/root/mount_chroot
+chroot "$CHROOT_DIR" /bin/bash -c "
+    dpkg --configure -a
+
+    echo '[*] Updating plugin packages...'
+    /root/venv/bin/pip install -r /root/plugins/streamingserver/requirements.txt
+"
+$CHROOT_DIR/root/umount_chroot
+echo "***********************************"
+echo "*         streamingserver         *"
+echo "*               by                *"
+echo "*          dream-alpha            *"
+echo "***********************************"
+echo ""
+echo "Plugin successfully installed."
+exit 0
