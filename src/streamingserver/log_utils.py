@@ -6,7 +6,7 @@ except Exception:
     from version import ID
 from datetime import datetime
 
-LOG_FILENAME = "pluto.log"
+LOG_FILENAME = "stream.log"
 
 def write_log(rec_dir, current_uri, section_index, segment_index, msg="none"):
     log_file = rec_dir + "/" + LOG_FILENAME

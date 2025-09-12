@@ -38,11 +38,12 @@ def update_channel_epg_cache():
     """
     def epg_loop():
         while True:
+            time.sleep(1800)  # 30 minutes
             try:
                 create_channel_epg_cache()
             except Exception as e:
                 logger.error(f"Error in create_channel_epg_cache: {e}")
-            time.sleep(1800)  # 30 minutes
+    create_channel_epg_cache()  # Initial call
     thread = threading.Thread(target=epg_loop, daemon=True)
     thread.start()
 

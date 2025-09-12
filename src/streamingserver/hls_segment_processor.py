@@ -37,6 +37,7 @@ class HLSSegmentProcessor:
         self.ffmpeg_proc = None
         self.previous_filler = None
         self.current_filler = None
+        self.buffering_completed = False
 
     def process_segment(self, session, target_duration, buffering, segment):
         logger.info("Segment: %s: %s", self.segment_index, segment.uri)
@@ -72,7 +73,13 @@ class HLSSegmentProcessor:
                 new_section = True
             self.monotonize_segment = self.current_filler
 
-        if new_section and self.section_index > 0:
+        if new_section and not self.buffering_completed:
+            if self.previous_segment_index >= buffering:
+                logger.info("Buffering completed, start with regular processing")
+                write_log(self.rec_dir, self.previous_uri, self.section_index, self.previous_segment_index, msg="buffering-complete")
+                self.buffering_completed = True
+
+        if new_section and self.buffering_completed:
             # check if previous segment was too short and use a filler file instead
             if self.previous_filler and self.previous_segment_index < buffering:
                 logger.info("Inserting bumper file before new section")
@@ -104,7 +111,7 @@ class HLSSegmentProcessor:
             segment_data, self.cc_map = update_continuity_counters(segment_data, self.cc_map)
             write_log(self.rec_dir, segment.uri, self.section_index, self.segment_index, msg="monotonize")
 
-        if segment.discontinuity and self.current_filler:
+        if segment.discontinuity:
             logger.info("Discontinuity found in segment %s", self.segment_index)
             segment_data = set_discontinuity_segment(segment_data)
             write_log(self.rec_dir, segment.uri, self.section_index, self.segment_index, msg="discontinuity")
