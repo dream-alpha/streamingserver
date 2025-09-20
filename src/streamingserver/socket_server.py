@@ -3,7 +3,7 @@
 
 import json
 import socketserver
-from plutotv_utils import update_channel_epg_cache
+from plutotv_utils import update_channel_data
 from debug import get_logger
 
 logger = get_logger(__file__)
@@ -59,7 +59,7 @@ class SocketServer(socketserver.ThreadingTCPServer):
         self.recorder = recorder
         self.clients = []  # List of active client sockets
         logger.info("RecorderSocketServer initialized at %s", server_address)
-        update_channel_epg_cache()
+        update_channel_data()
 
     def broadcast(self, message):
         # Broadcast message to all connected clients
