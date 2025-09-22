@@ -1,4 +1,4 @@
-# streamingserver
+# StreamingServer
 
 ## Purpose
 
@@ -8,8 +8,7 @@
 ## Installation
 
 The streamingserver app will be installed as a dependency of the StreamingCockpit plugin.
-if you want to manually install it on an Ubuntu PC or WSL:
-- pip install -i https://test.pypi.org/simple/ streamingserver
+No manual installation is required.
 
 ## Links
 
