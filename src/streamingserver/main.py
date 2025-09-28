@@ -35,15 +35,18 @@ def main():
     and starts a socket server to listen for commands. It can also start a
     recording immediately if a channel is provided via arguments.
     """
-    logger.debug("HLS Recorder")
+    logger.info("*" * 70)
+    logger.info("HLS Recorder")
+    logger.info("*" * 70)
     # Ensure shutdown handler is registered for SIGTERM and SIGINT
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
     parser = argparse.ArgumentParser(description="HLS Recorder")
-    parser.add_argument('--rec_dir', type=str, default='pluto.ts', help='File name for recording file (default: pluto.ts)')
-    parser.add_argument('--channel', type=str, help='Channel ID')
+    parser.add_argument('--rec_dir', type=str, default='/tmp', help='Recording directory (default /tmp')
+    parser.add_argument('--channel', type=str, default='https://None', help='Channel ID or URL')
     parser.add_argument('--show_ads', action='store_true', help='Whether to show ads (default: False)')
+    parser.add_argument('--buffering', type=str, default='5', help='Buffering number of segments beore playback start')
     args = parser.parse_args()
 
     global recorder, socketserver  # pylint: disable=global-variable-undefined
@@ -59,9 +62,9 @@ def main():
         socketserver_thread.start()
         logger.debug("Command socket server running on %s:%s", HOST, PORT)
         logger.debug("Ready for commands. Use 'start', 'stop' via socket.")
-        if args.channel:
+        if args.channel != "https://None":
             logger.debug("Press Ctrl+C to exit.")
-            recorder.start(args.channel, args.rec_dir, args.show_ads)
+            recorder.start(args.channel, args.rec_dir, args.show_ads, args.buffering)
         while True:
             time.sleep(1)
 

@@ -1,12 +1,12 @@
 [
     {
         "name": "PlutoTV",
-        "path": "PlutoTV",
-        "icon": "plutotv.png"
+	"path": "PlutoTV",
+	"icon": "plutotv.png"
     },
     {
-        "name": "SamsungTV",
-        "path": "SamsungTV",
-        "icon": "samsungtv.png"
+	"name": "SamsungTV",
+	"path": "SamsungTV",
+	"icon": "samsungtv.png"
     }
 ]

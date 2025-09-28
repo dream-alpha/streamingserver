@@ -5,9 +5,10 @@ This module provides a function to process all logic for a single HLS segment,
 as refactored from hls_recorder.py.
 """
 
+import os
 from ts_utils import shift_segment, is_valid_ts_segment, set_discontinuity_segment, update_continuity_counters
 from ffmpeg_utils import close_ffmpeg_process, open_ffmpeg_process, write_ffmpeg_segment
-from hls_segment_utils import append_to_rec_file, get_segment_properties, download_segment, is_filler_segment
+from hls_segment_utils import append_to_rec_file, get_segment_properties, download_segment, is_filler_segment, save_segment_to_file
 from hls_playlist_utils import different_uris
 from log_utils import write_log
 from debug import get_logger
@@ -73,20 +74,20 @@ class HLSSegmentProcessor:
                 new_section = True
             self.monotonize_segment = self.current_filler
 
-        if new_section and not self.buffering_completed:
-            if self.previous_segment_index >= buffering:
-                logger.info("Buffering completed, start with regular processing")
-                write_log(self.rec_dir, self.previous_uri, self.section_index, self.previous_segment_index, msg="buffering-complete")
-                self.buffering_completed = True
-
         if new_section and self.buffering_completed:
             # check if previous segment was too short and use a filler file instead
-            if self.previous_filler and self.previous_segment_index < buffering:
+            if self.previous_filler and self.previous_segment_index < 3:
                 logger.info("Inserting bumper file before new section")
-                write_log(self.rec_dir, self.previous_uri, self.section_index, self.previous_segment_index, msg="bumper-file")
-                bumper_file = "/data/ubuntu/root/plugins/streamingserver/data/ad2_0.ts"
+                write_log(self.rec_dir, "bumper-file", self.section_index, self.previous_segment_index, msg="bumper-file")
+                bumper_file = "/root/plugins/streamingserver/data/ad2_0.ts"
+                with open(bumper_file, "rb") as bf:
+                    bumper_data = bf.read()
+                logger.info("Inserting bumper file of size %s bytes", len(bumper_data))
+                os.remove(self.section_file)
+                logger.info("Removed section file %s to insert bumper", self.section_file)
+                append_to_rec_file(self.section_file, bumper_data)
                 if self.socketserver:
-                    self.socketserver.broadcast({"command": "start", "args": [self.previous_uri, bumper_file, self.section_index, -1]})
+                    self.socketserver.broadcast(["start", {"url": "bumper-file", "rec_file": self.section_file, "section_index": self.section_index, "segment_index": self.previous_segment_index}])
 
         if new_section:
             logger.info("=" * 70)
@@ -121,11 +122,19 @@ class HLSSegmentProcessor:
             write_log(self.rec_dir, segment.uri, self.section_index, self.segment_index, msg="ffmpeg-segment")
         else:
             append_to_rec_file(self.section_file, segment_data)
+            # self.segment_file = f"{self.rec_dir}/segment_{self.segment_index}.ts"
+            # save_segment_to_file(segment_data, self.segment_file)
             write_log(self.rec_dir, segment.uri, self.section_index, self.segment_index, msg="filler-segment")
+
         logger.info("Writing segment %s, %s to %s", self.segment_index, segment.uri, self.section_file)
 
-        if self.socketserver:
-            self.socketserver.broadcast({"command": "start", "args": [segment.uri, self.section_file, self.section_index, self.segment_index]})
+        if self.segment_index == buffering:
+            if self.socketserver:
+                self.socketserver.broadcast(["start", {"url": segment.uri, "rec_file": self.section_file, "section_index": self.section_index, "segment_index": self.segment_index}])
+            if not self.buffering_completed:
+                self.buffering_completed = True
+                logger.info("Buffering completed.")
+                write_log(self.rec_dir, segment.uri, self.section_index, self.segment_index, msg="buffering-complete")
 
         self.previous_segment_index = self.segment_index
         self.segment_index += 1

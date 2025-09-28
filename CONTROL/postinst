@@ -31,11 +31,6 @@ cp /data/ffmpeg-7.0.2-$arch-static/ffmpeg $CHROOT_DIR/usr/bin
 cp /data/ffmpeg-7.0.2-$arch-static/ffprobe $CHROOT_DIR/usr/bin
 rm -rf /data/ffmpeg-7.0.2-$arch-static
 
-# Copy providers config if not available in /etc/enigma2
-if [ ! -f "/etc/enigma2/UVP/providers.json" ]; then
-    cp "$UBUNTU_DIR/data/providers.json" "/etc/enigma2/UVP"
-fi
-
 $CHROOT_DIR/root/mount_chroot
 chroot "$CHROOT_DIR" /bin/bash -c "
     dpkg --configure -a

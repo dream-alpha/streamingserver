@@ -262,3 +262,19 @@ def get_segment_properties(segment_data: bytes) -> tuple[str | None, float | Non
         except Exception as e:
             logger.error("An unexpected error occurred while getting segment properties: %s", e)
             return None, None, None, None, None
+
+
+def save_segment_to_file(segment_data: bytes, file_path: str) -> None:
+    """
+    Saves segment data to a specified file.
+
+    Args:
+        segment_data: The binary segment data to save.
+        file_path: The path where the segment should be saved.
+    """
+    try:
+        with open(file_path, 'wb') as f:
+            f.write(segment_data)
+        logger.debug("Saved segment to %s", file_path)
+    except Exception as e:
+        logger.error("Error saving segment to file %s: %s", file_path, e)

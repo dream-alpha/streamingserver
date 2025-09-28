@@ -76,6 +76,7 @@ class HLS_Recorder:
         reload_master_playlist = True
         media_playlist_url = None
         last_sequence = None
+        failed_segment_count = 0
 
         segment_processor = HLSSegmentProcessor(rec_dir, self.socketserver)
 
@@ -131,14 +132,22 @@ class HLS_Recorder:
                     if last_sequence is not None and sequence <= last_sequence:
                         continue  # Already processed
 
-                    segment_processor.process_segment(self.session, target_duration, buffering, segment)
+                    segment = segment_processor.process_segment(self.session, target_duration, buffering, segment)
+                    if segment is None:
+                        failed_segment_count += 1
+                        if failed_segment_count >= 5:
+                            logger.error("Too many failed segments, stopping recording...")
+                            self.socketserver.broadcast(["stop", {"reason": "error", "channel": self.channel_uri, "rec_dir": rec_dir}])
+                            self.stop_event.set()
+                    else:
+                        failed_segment_count = 0
                     last_sequence = sequence
 
         except KeyboardInterrupt:
             logger.info("Recording interrupted by user")
         except Exception as e:
             logger.error("Recording error: %s", e)
-            self.socketserver.broadcast({"command": "stop", "args": ["error", self.channel_uri, rec_dir]})
+            self.socketserver.broadcast(["stop", {"reason": "error", "channel": self.channel_uri, "rec_dir": rec_dir}])
             traceback.print_exc()
         finally:
             terminate_ffmpeg_process(segment_processor.ffmpeg_proc)
