@@ -5,24 +5,25 @@ import os
 import re
 import json
 import gzip
-import time
 import tempfile
 from io import BytesIO
 from pathlib import Path
 import threading
 import datetime
 import requests
+from debug import get_logger
+
+logger = get_logger(__file__)
 
 
-TIMEOUT = (5, 20)  # connect,read
+TIMEOUT = (5, 20)  # connect, read
 
 
-class SamsungTV():
-    def __init__(self, data_dir):
+class Provider():
+    def __init__(self, provider_id, data_dir):
+        self.provider_id = provider_id
         self.data_dir = data_dir
-        self.cache_file = Path("/root/plugins/streamingserver/data/SamsungTV") / "cache.json"
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_file = self.data_dir / "cache.json"
         self._update_thread = None
         self._stop_event = threading.Event()
         self.update_channel_data()
@@ -33,18 +34,18 @@ class SamsungTV():
         """
         # logger.info("Fetching categories")
         categories = []
-        categories_file = os.path.join(self.data_dir, "categories.json")
+        categories_file = self.data_dir / "categories.json"
         with open(categories_file, 'r', encoding="utf-8") as f:
             categories = json.load(f)
-        return categories
+        return [{**category, "provider_id": self.provider_id} for category in categories]
 
-    def get_channels(self, category):
+    def get_media_items(self, category):
         """
         Returns a list of channels.
         """
         # logger.info("Fetching channels for category: %s", category)
         channels = []
-        channels_file = os.path.join(self.data_dir, "channels.json")
+        channels_file = self.data_dir / "channels.json"
         with open(channels_file, 'r', encoding="utf-8") as f:
             channels = json.load(f)
         return channels.get(category["name"], [])
@@ -175,7 +176,7 @@ class SamsungTV():
                         self.cache_file.write_text(resp.text, encoding="utf-8")
                 except Exception:
                     pass
-                print("Failed to fetch or parse SamsungTV JSON")
+                logger.info("Failed to fetch or parse SamsungTV JSON")
                 # Cleanup tmp file on error
                 try:
                     if tmp_path and os.path.exists(tmp_path):
@@ -254,8 +255,8 @@ class SamsungTV():
 
 def main():
     data_dir = Path("/root/plugins/streamingserver/data")
-    pluto = SamsungTV(data_dir)
-    pluto.update_channel_data()  # Start background updates
+    samsung = Provider("SamsungTV", data_dir)
+    samsung.update_channel_data()  # Start background updates
 
 
 if __name__ == "__main__":

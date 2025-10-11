@@ -1,11 +1,9 @@
 # Copyright (C) 2018-2025 by dream-alpha
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
-import os
 import re
 import uuid
 import json
-import time
 import threading
 import datetime
 import urllib.parse
@@ -16,12 +14,11 @@ import requests
 # logger = get_logger(__file__)
 
 
-class PlutoTV():
-    def __init__(self, data_dir):
-        self.data_dir = data_dir
-        self.cache_file = Path("/root/plugins/streamingserver/data/PlutoTV") / "cache.json"
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+class Provider():
+    def __init__(self, provider_id, data_dir):
+        self.provider_id = provider_id
+        self.data_dir = Path(data_dir)
+        self.cache_file = self.data_dir / "cache.json"
         self._update_thread = None
         self._stop_event = threading.Event()
         self.update_channel_data()
@@ -32,18 +29,18 @@ class PlutoTV():
         """
         # logger.info("Fetching categories")
         categories = []
-        categories_file = os.path.join(self.data_dir, "categories.json")
+        categories_file = self.data_dir / "categories.json"
         with open(categories_file, 'r', encoding="utf-8") as f:
             categories = json.load(f)
-        return categories
+        return [{**category, "provider_id": self.provider_id} for category in categories]
 
-    def get_channels(self, category):
+    def get_media_items(self, category):
         """
         Returns a list of channels.
         """
         # logger.info("Fetching channels for category: %s", category)
         channels = []
-        channels_file = os.path.join(self.data_dir, "channels.json")
+        channels_file = self.data_dir / "channels.json"
         with open(channels_file, 'r', encoding="utf-8") as f:
             channels = json.load(f)
         return channels.get(category["name"], [])
@@ -246,7 +243,7 @@ class PlutoTV():
 
 def main():
     data_dir = Path("/root/plugins/streamingserver/data")
-    pluto = PlutoTV(data_dir)
+    pluto = Provider("PlutoTV", data_dir)
     pluto.update_channel_data()  # Start background updates
 
 

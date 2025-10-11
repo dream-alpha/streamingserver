@@ -427,7 +427,7 @@ max-positional-arguments=10
 max-locals=50
 
 # Maximum number of return / yield for function / method body
-max-returns=20
+max-returns=30
 
 # Maximum number of branch for function / method body
 max-branches=50

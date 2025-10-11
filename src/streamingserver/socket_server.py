@@ -1,14 +1,11 @@
 # Copyright (C) 2018-2025 by dream-alpha
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
-import os
 import json
 from pathlib import Path
 import socketserver
-import shutil
-from provider import Provider
-from config import config
-from version import ID
+from provider_manager import ProviderManager
+from stream_recorder import StreamRecorder
 from debug import get_logger
 
 logger = get_logger(__file__)
@@ -16,36 +13,11 @@ logger = get_logger(__file__)
 
 class CommandHandler(socketserver.BaseRequestHandler):
     def __init__(self, request, client_address, server):
-        self.provider_factory = Provider()
+        self.provider_manager = ProviderManager()
         super().__init__(request, client_address, server)
-
-    def get_providers(self, data_dir):
-        providers = []
-        with open(data_dir / 'providers.json', 'r', encoding="utf-8") as f:
-            providers = json.load(f)
-        return providers
 
     def handle(self):
         logger.debug("Connection established with %s", self.client_address)
-
-        data_dirs = [
-            config.plugins.streamingcockpit.data_dir.value,
-            "/root/plugins/streamingserver/data"
-        ]
-        logger.info("data_dirs: %s", data_dirs)
-        for adir in data_dirs:
-            if adir:
-                self.data_dir = Path(adir)
-                if self.data_dir.exists():
-                    break
-        logger.info("Using data directory: %s", self.data_dir)
-        self.data_dir = self.data_dir / ID
-        os.makedirs(self.data_dir, exist_ok=True)
-
-        # copy default providers.json if not present in user data dir
-        if not (self.data_dir / "providers.json").exists():
-            logger.info("Copying default providers.json to %s", self.data_dir)
-            shutil.copyfile("/root/plugins/streamingserver/data/providers.json", self.data_dir / "providers.json")
 
         # Send a 'ready' message to the client upon connection
         ready_message = ["ready", {}]
@@ -69,46 +41,95 @@ class CommandHandler(socketserver.BaseRequestHandler):
                     logger.debug("socket server received: %s", req)
                     cmd = req[0]
                     args = req[1] if len(req) > 1 else {}
+                    logger.info("args: %s", args)
+                    provider_id = args.get("provider", {}).get("provider_id", None)
+                    data_dir = args.get("data_dir", None)
+                    if not data_dir:
+                        data_dir = Path.cwd() / "data"
+                    else:
+                        data_dir = Path(data_dir)
+                    data_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info("data_dir: %s", data_dir)
+
                     if cmd == "start":
                         logger.info("Starting recording with args: %s", args)
-                        self.server.recorder.start(
-                            args.get("url", "none"),
+                        if self.server.recorder is None:
+                            self.server.recorder = StreamRecorder()
+                            self.server.recorder.server = self.server
+
+                        url = args.get("url", "")
+
+                        # Try to resolve URL if provider is available
+                        resolved_url = url
+                        auth_tokens = None
+                        original_page_url = None
+                        all_sources = None
+
+                        provider_instance = self.provider_manager.get_provider(
+                            provider_id,
+                            data_dir
+                        )
+                        if provider_instance and hasattr(provider_instance, 'resolve_url'):
+                            logger.info("Resolving URL for recording: %s", url)
+                            resolution = args.get("resolution", "best")
+                            resolve_result = provider_instance.resolve_url(url, resolution)
+
+                            # Handle enhanced result with auth tokens
+                            resolved_url = resolve_result.get("streaming_url", url)
+                            auth_tokens = resolve_result.get("auth_tokens")
+                            original_page_url = resolve_result.get("original_page_url", url)
+                            all_sources = resolve_result.get("all_sources")
+
+                            if resolved_url and resolved_url != url:
+                                logger.info("Resolved to streaming URL: %s", resolved_url[:100] + "..." if len(resolved_url) > 100 else resolved_url)
+                                if auth_tokens:
+                                    logger.info("Authentication tokens acquired for protected stream")
+                            else:
+                                logger.warning("URL resolution failed, using original URL")
+                                resolved_url = url
+                        else:
+                            logger.warning("Provider doesn't support URL resolution, using original URL")
+
+                        self.server.recorder.record_stream(
+                            resolved_url,
                             args.get("rec_dir", "/tmp"),
                             args.get("show_ads", False),
                             args.get("buffering", 5),
+                            auth_tokens=auth_tokens,
+                            original_page_url=original_page_url,
+                            all_sources=all_sources,
                         )
                     elif cmd == "stop":
                         logger.info("Stopping recording")
-                        self.server.recorder.stop()
+                        if self.server.recorder is not None:
+                            self.server.recorder.stop()
                     elif cmd == "get_providers":
-                        response = ["get_providers", {"data": self.get_providers(self.data_dir)}]
+                        response = ["get_providers", {"data": self.provider_manager.get_providers()}]
                         logger.info("Sending providers: %s", response)
                         self.request.sendall((json.dumps(response) + '\n').encode())
                     elif cmd == "get_categories":
                         categories = []
-                        provider = args.get("provider", None)
-                        if provider:
-                            provider_instance = self.provider_factory.get_provider(
-                                provider.get("name", ""),
-                                self.data_dir / provider.get("path", "")
+                        if provider_id and data_dir:
+                            provider_instance = self.provider_manager.get_provider(
+                                provider_id,
+                                data_dir
                             )
                             if provider_instance:
                                 categories = provider_instance.get_categories()
                         response = ["get_categories", {"data": categories}]
-                        logger.info("Sending categories: %s", categories)
+                        # logger.info("Sending categories: %s", categories)
                         self.request.sendall((json.dumps(response) + '\n').encode())
-                    elif cmd == "get_channels":
+                    elif cmd == "get_media_items":
                         channels = []
-                        provider = args.get("provider", None)
                         category = args.get("category", None)
-                        if provider and category:
-                            provider_instance = self.provider_factory.get_provider(
-                                provider.get("name", ""),
-                                self.data_dir / provider.get("path", "")
+                        if provider_id and category and data_dir:
+                            provider_instance = self.provider_manager.get_provider(
+                                provider_id,
+                                data_dir
                             )
                             if provider_instance:
-                                channels = provider_instance.get_channels(category)
-                        response = ["get_channels", {"data": channels}]
+                                channels = provider_instance.get_media_items(category)
+                        response = ["get_media_items", {"data": channels}]
                         logger.info("Sending channels: %s", channels)
                         self.request.sendall((json.dumps(response) + '\n').encode())
                     else:
@@ -122,9 +143,9 @@ class CommandHandler(socketserver.BaseRequestHandler):
 class SocketServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
-    def __init__(self, server_address, handler_class, recorder):
+    def __init__(self, server_address, handler_class):
         super().__init__(server_address, handler_class)
-        self.recorder = recorder
+        self.recorder = None
         self.clients = []  # List of active client sockets
         logger.info("RecorderSocketServer initialized at %s", server_address)
 

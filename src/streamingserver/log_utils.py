@@ -25,22 +25,23 @@ from datetime import datetime
 
 LOG_FILENAME = "stream.log"
 
+
 def write_log(rec_dir, current_uri, section_index, segment_index, msg="none"):
     log_file = rec_dir + "/" + LOG_FILENAME
     # Get current time in hh:mm:ss.milliseconds format
     now = datetime.now()
     ms = int(now.microsecond / 1000)
-    timestamp = "%s.%03d" % (now.strftime("%H:%M:%S"), ms)
+    timestamp = "%s.%03d" % (now.strftime("%H:%M:%S"), ms)  # pylint: disable=consider-using-f-string
 
     try:
-        section_index = "%03d" % int(section_index)
+        section_index = "%03d" % int(section_index)  # pylint: disable=consider-using-f-string
     except (ValueError, TypeError):
         section_index = "---"
     try:
-        segment_index = "%03d" % int(segment_index)
+        segment_index = "%03d" % int(segment_index)  # pylint: disable=consider-using-f-string
     except (ValueError, TypeError):
         segment_index = "---"
 
-    with open(log_file, 'a') as log_f:
-        log_f.write("%s %s %s/%s: %s - %s\n" % (timestamp, ID, section_index, segment_index, current_uri, msg))
+    with open(log_file, 'a') as log_f:  # pylint: disable=unspecified-encoding
+        log_f.write("%s %s %s/%s: %s - %s\n" % (timestamp, ID, section_index, segment_index, current_uri, msg))  # pylint: disable=consider-using-f-string
         log_f.flush()

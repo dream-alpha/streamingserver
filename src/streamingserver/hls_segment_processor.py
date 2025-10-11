@@ -6,9 +6,10 @@ as refactored from hls_recorder.py.
 """
 
 import os
+from urllib.parse import urljoin
 from ts_utils import shift_segment, is_valid_ts_segment, set_discontinuity_segment, update_continuity_counters
 from ffmpeg_utils import close_ffmpeg_process, open_ffmpeg_process, write_ffmpeg_segment
-from hls_segment_utils import append_to_rec_file, get_segment_properties, download_segment, is_filler_segment, save_segment_to_file
+from hls_segment_utils import append_to_rec_file, get_segment_properties, download_segment, is_filler_segment  # , save_segment_to_file
 from hls_playlist_utils import different_uris
 from log_utils import write_log
 from debug import get_logger
@@ -17,10 +18,13 @@ logger = get_logger(__file__)
 
 
 class HLSSegmentProcessor:
-    def __init__(self, rec_dir, socketserver):
+    def __init__(self, rec_dir, socketserver, playlist_base_url=None):
         self.rec_dir = rec_dir
         self.rec_file = rec_dir + "/pluto.ts"
         self.socketserver = socketserver
+        self.playlist_base_url = playlist_base_url
+        logger.info("DEBUG: HLSSegmentProcessor initialized with socketserver: %s", socketserver)
+        logger.info("DEBUG: Playlist base URL: %s", playlist_base_url)
         # State variables
         self.segment_index = 0
         self.previous_segment_index = -1
@@ -40,14 +44,43 @@ class HLSSegmentProcessor:
         self.current_filler = None
         self.buffering_completed = False
 
+    def _resolve_segment_url(self, segment_uri):
+        """
+        Resolve segment URI to absolute URL if it's relative.
+
+        Args:
+            segment_uri (str): Segment URI from m3u8 playlist (may be relative)
+
+        Returns:
+            str: Absolute URL for the segment
+        """
+        # If segment URI is already absolute, return as-is
+        if segment_uri.startswith('http'):
+            return segment_uri
+
+        # If we have a base URL, join the relative URI with it
+        if self.playlist_base_url:
+            resolved_url = urljoin(self.playlist_base_url, segment_uri)
+            logger.info("DEBUG: Joined '%s' with base '%s' = '%s'", segment_uri, self.playlist_base_url, resolved_url)
+            return resolved_url
+
+        # Fallback: return original URI (will likely fail but better than crashing)
+        logger.warning("No base URL available for resolving relative segment URI: %s", segment_uri)
+        return segment_uri
+
     def process_segment(self, session, target_duration, buffering, segment):
         logger.info("Segment: %s: %s", self.segment_index, segment.uri)
+
+        # Resolve relative segment URLs to absolute URLs
+        segment_url = self._resolve_segment_url(segment.uri)
+        logger.info("DEBUG: Resolved segment URL: %s", segment_url)
+
         new_section = False
         key_info = {"METHOD": None, "URI": None, "IV": None}
         if segment.key:
             key_info = {"METHOD": segment.key.method, "URI": segment.key.uri, "IV": segment.key.iv}
 
-        segment_data = download_segment(session, segment.uri, self.segment_index, key_info, max_retries=10, timeout=5)
+        segment_data = download_segment(session, segment_url, self.segment_index, key_info, max_retries=10, timeout=5)
         if not segment_data or not is_valid_ts_segment(segment_data):
             logger.error("Failed to download segment or invalid ts segment %s", self.segment_index)
             return None
@@ -87,7 +120,11 @@ class HLSSegmentProcessor:
                 logger.info("Removed section file %s to insert bumper", self.section_file)
                 append_to_rec_file(self.section_file, bumper_data)
                 if self.socketserver:
+                    logger.info("DEBUG: Broadcasting bumper file message")
                     self.socketserver.broadcast(["start", {"url": "bumper-file", "rec_file": self.section_file, "section_index": self.section_index, "segment_index": self.previous_segment_index}])
+                    logger.info("DEBUG: Bumper file broadcast complete")
+                else:
+                    logger.warning("DEBUG: No socketserver available for bumper file broadcast")
 
         if new_section:
             logger.info("=" * 70)
@@ -129,8 +166,13 @@ class HLSSegmentProcessor:
         logger.info("Writing segment %s, %s to %s", self.segment_index, segment.uri, self.section_file)
 
         if self.segment_index == buffering:
+            logger.info("DEBUG: Buffering reached (%d), checking socketserver: %s", buffering, self.socketserver)
             if self.socketserver:
+                logger.info("DEBUG: Broadcasting start message for segment %d", self.segment_index)
                 self.socketserver.broadcast(["start", {"url": segment.uri, "rec_file": self.section_file, "section_index": self.section_index, "segment_index": self.segment_index}])
+                logger.info("DEBUG: Broadcast complete")
+            else:
+                logger.warning("DEBUG: No socketserver available for broadcast")
             if not self.buffering_completed:
                 self.buffering_completed = True
                 logger.info("Buffering completed.")

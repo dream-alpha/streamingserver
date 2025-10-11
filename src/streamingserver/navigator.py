@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+# Copyright (C) 2018-2025 by dream-alpha
+# License: GNU General Public License v3.0 (see LICENSE file for details)
+
+# pylint: disable=bad-builtin
+
+"""
+Navigator - Socket Client for Testing Provider Commands
+
+This script provides an interactive command-line interface for testing
+the socket server's provider functionality. It allows users to:
+1. Get available providers
+2. Select a provider and get its categories
+3. Select a category and get its media items
+4. Record selected media items
+"""
+
+import json
+import socket
+import sys
+import argparse
+import os
+import subprocess
+from pathlib import Path
+
+
+class Navigator:
+    def __init__(self, host="localhost", port=5000):
+        self.host = host
+        self.port = port
+        self.socket = None
+        self.providers = []
+        self.selected_provider = None
+        self.categories = []
+        self.selected_category = None
+        self.media_items = []
+        self.selected_media_item = None
+
+    def connect(self):
+        """Connect to the socket server."""
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(10)  # Add 10-second timeout
+            print(f"Attempting to connect to {self.host}:{self.port}...")
+            self.socket.connect((self.host, self.port))
+
+            # Read the initial 'ready' message with timeout
+            self.socket.settimeout(5)  # 5-second timeout for receiving
+            response = self.socket.recv(4096).decode().strip()
+            self.socket.settimeout(None)  # Remove timeout for normal operation
+
+            if response:
+                try:
+                    ready_msg = json.loads(response)
+                    print(f"Server says: {ready_msg}")
+                except json.JSONDecodeError:
+                    print(f"Received non-JSON response: {response[:100]}...")
+
+            print(f"Connected to server at {self.host}:{self.port}")
+            return True
+        except Exception as e:
+            print(f"Failed to connect: {e}")
+            return False
+
+    def send_command(self, command, args=None):
+        """Send a command to the server and return the response."""
+        if args is None:
+            args = {}
+
+        message = [command, args]
+        try:
+            self.socket.sendall((json.dumps(message) + '\n').encode())
+
+            # For commands that expect a response
+            if command in {"get_providers", "get_categories", "get_media_items"}:
+                response = self._receive_full_message()
+                if response:
+                    return json.loads(response)
+            return None
+        except Exception as e:
+            print(f"Error sending command: {e}")
+            return None
+
+    def _receive_full_message(self):
+        """Receive a complete message, handling large responses."""
+        try:
+            # Read data until we get a complete JSON message
+            buffer = b''
+            while True:
+                chunk = self.socket.recv(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+
+                # Try to decode and parse the current buffer
+                try:
+                    message = buffer.decode('utf-8').strip()
+                    if message:
+                        # Try to parse as JSON to see if it's complete
+                        json.loads(message)
+                        return message
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    # Not complete yet, continue reading
+                    continue
+
+            # If we get here, return what we have
+            return buffer.decode('utf-8', errors='ignore').strip()
+        except Exception as e:
+            print(f"Error receiving message: {e}")
+            return None
+
+    def get_providers(self):
+        """Get list of available providers."""
+        print("\n" + "=" * 50)
+        print("GETTING PROVIDERS")
+        print("=" * 50)
+
+        response = self.send_command("get_providers")
+        if response and response[0] == "get_providers":
+            self.providers = response[1]["data"]
+            print(f"Found {len(self.providers)} providers:")
+            for i, provider in enumerate(self.providers):
+                print(f"{i + 1:2d}. {provider.get('name', 'Unknown')} (ID: {provider.get('provider_id', 'N/A')})")
+            return True
+        print("Failed to get providers")
+        return False
+
+    def select_provider(self):
+        """Allow user to select a provider."""
+        if not self.providers:
+            print("No providers available. Get providers first.")
+            return False
+
+        while True:
+            try:
+                choice = input(f"\nSelect provider (1-{len(self.providers)}) or 'q' to quit: ").strip()
+                if choice.lower() == 'q':
+                    return False
+
+                index = int(choice) - 1
+                if 0 <= index < len(self.providers):
+                    self.selected_provider = self.providers[index]
+                    print(f"Selected provider: {self.selected_provider.get('name', 'Unknown')}")
+                    return True
+                print(f"Please enter a number between 1 and {len(self.providers)}")
+            except ValueError:
+                print("Please enter a valid number or 'q'")
+
+    def get_categories(self):
+        """Get categories for the selected provider."""
+        if not self.selected_provider:
+            print("No provider selected")
+            return False
+
+        print("\n" + "=" * 50)
+        print(f"GETTING CATEGORIES FOR: {self.selected_provider.get('name', 'Unknown')}")
+        print("=" * 50)
+
+        args = {
+            "provider": self.selected_provider,
+            "data_dir": "/home/alpha/streamingserver"
+        }
+
+        response = self.send_command("get_categories", args)
+        if response and response[0] == "get_categories":
+            self.categories = response[1]["data"]
+            print(f"Found {len(self.categories)} categories:")
+            for i, category in enumerate(self.categories):
+                # Categories might be strings or objects
+                if isinstance(category, str):
+                    print(f"{i + 1:2d}. {category}")
+                else:
+                    print(f"{i + 1:2d}. {category.get('name', category)}")
+            return True
+        print("Failed to get categories")
+        return False
+
+    def select_category(self):
+        """Allow user to select a category."""
+        if not self.categories:
+            print("No categories available. Get categories first.")
+            return False
+
+        while True:
+            try:
+                choice = input(f"\nSelect category (1-{len(self.categories)}) or 'q' to quit: ").strip()
+                if choice.lower() == 'q':
+                    return False
+
+                index = int(choice) - 1
+                if 0 <= index < len(self.categories):
+                    self.selected_category = self.categories[index]
+                    category_name = self.selected_category if isinstance(self.selected_category, str) else self.selected_category.get('name', 'Unknown')
+                    print(f"Selected category: {category_name}")
+                    return True
+                print(f"Please enter a number between 1 and {len(self.categories)}")
+            except ValueError:
+                print("Please enter a valid number or 'q'")
+
+    def get_media_items(self):
+        """Get media items for the selected category."""
+        if not self.selected_provider or not self.selected_category:
+            print("Need both provider and category selected")
+            return False
+
+        category_name = self.selected_category if isinstance(self.selected_category, str) else self.selected_category.get('name', 'Unknown')
+        print("\n" + "=" * 50)
+        print("GETTING MEDIA ITEMS")
+        print(f"Provider: {self.selected_provider.get('name', 'Unknown')}")
+        print(f"Category: {category_name}")
+        print("=" * 50)
+
+        args = {
+            "provider": self.selected_provider,
+            "category": self.selected_category,
+            "data_dir": str(Path.cwd())
+        }
+
+        response = self.send_command("get_media_items", args)
+        if response and response[0] == "get_media_items":
+            self.media_items = response[1]["data"]
+            print(f"Found {len(self.media_items)} media items:")
+            for i, item in enumerate(self.media_items[:20]):  # Show max 20 items
+                if isinstance(item, dict):
+                    title = item.get('title', item.get('name', 'Unknown'))
+                    url = item.get('url', 'N/A')
+                    print(f"{i + 1:2d}. {title}")
+                    print(f"     URL: {url}")
+                else:
+                    print(f"{i + 1:2d}. {item}")
+
+            if len(self.media_items) > 20:
+                print(f"... and {len(self.media_items) - 20} more items")
+            return True
+        print("Failed to get media items")
+        return False
+
+    def select_media_item(self):
+        """Allow user to select a media item from the available list."""
+        if not self.media_items:
+            print("No media items available. Get media items first.")
+            return False
+
+        print("\n" + "=" * 50)
+        print("SELECT MEDIA ITEM")
+        print("=" * 50)
+
+        # Show media items for selection
+        for i, item in enumerate(self.media_items[:20]):  # Show max 20 items
+            if isinstance(item, dict):
+                title = item.get('title', item.get('name', 'Unknown'))
+                print(f"{i + 1:2d}. {title}")
+            else:
+                print(f"{i + 1:2d}. {item}")
+
+        if len(self.media_items) > 20:
+            print(f"... and {len(self.media_items) - 20} more items (only first 20 selectable)")
+
+        while True:
+            try:
+                choice = input(f"\nSelect media item (1-{min(20, len(self.media_items))}) or 'q' to quit: ").strip()
+                if choice.lower() == 'q':
+                    return False
+
+                index = int(choice) - 1
+                if 0 <= index < min(20, len(self.media_items)):
+                    self.selected_media_item = self.media_items[index]
+                    if isinstance(self.selected_media_item, dict):
+                        title = self.selected_media_item.get('title', self.selected_media_item.get('name', 'Unknown'))
+                    else:
+                        title = str(self.selected_media_item)
+                    print(f"Selected media item: {title}")
+                    return True
+                print(f"Please enter a number between 1 and {min(20, len(self.media_items))}")
+            except ValueError:
+                print("Please enter a valid number or 'q'")
+
+    def record_media_item(self):
+        """Start recording the selected media item.
+        If no item is selected, automatically select the first provider,
+        first category, and first media item."""
+        if not self.selected_media_item:
+            print("No media item selected. Automatically selecting first provider, category, and media item...")
+
+            # Get providers if needed
+            if not self.providers:
+                if not self.get_providers():
+                    print("Failed to get providers.")
+                    return False
+
+            # Select first provider if not selected
+            if not self.selected_provider and self.providers:
+                self.selected_provider = self.providers[0]
+                provider_name = self.selected_provider.get('name', 'Unknown')
+                print(f"Selected first provider: {provider_name}")
+
+            # Get categories if needed
+            if not self.categories and self.selected_provider:
+                if not self.get_categories():
+                    print("Failed to get categories.")
+                    return False
+
+            # Select first category if not selected
+            if not self.selected_category and self.categories:
+                self.selected_category = self.categories[0]
+                category_name = self.selected_category if isinstance(self.selected_category, str) else self.selected_category.get('name', 'Unknown')
+                print(f"Selected first category: {category_name}")
+
+            # Get media items if needed
+            if not self.media_items and self.selected_provider and self.selected_category:
+                if not self.get_media_items():
+                    print("Failed to get media items.")
+                    return False
+
+            # Select first media item if not selected
+            if not self.selected_media_item and self.media_items:
+                self.selected_media_item = self.media_items[0]
+                if isinstance(self.selected_media_item, dict):
+                    title = self.selected_media_item.get('title', self.selected_media_item.get('name', 'Unknown'))
+                else:
+                    title = str(self.selected_media_item)
+                print(f"Selected first media item: {title}")
+
+            # If still no media item, return failure
+            if not self.selected_media_item:
+                print("Failed to automatically select a media item. Please make selections manually.")
+                return False
+
+        return self.start_recording(self.selected_media_item)
+
+    def select_and_record_media_item(self):
+        """Allow user to select a media item and start recording it."""
+        if not self.media_items:
+            print("No media items available. Get media items first.")
+            return False
+
+        print("\n" + "=" * 50)
+        print("SELECT MEDIA ITEM TO RECORD")
+        print("=" * 50)
+
+        # Show media items for selection
+        for i, item in enumerate(self.media_items[:20]):  # Show max 20 items
+            if isinstance(item, dict):
+                title = item.get('title', item.get('name', 'Unknown'))
+                print(f"{i + 1:2d}. {title}")
+            else:
+                print(f"{i + 1:2d}. {item}")
+
+        if len(self.media_items) > 20:
+            print(f"... and {len(self.media_items) - 20} more items (only first 20 selectable)")
+
+        while True:
+            try:
+                choice = input(f"\nSelect media item (1-{min(20, len(self.media_items))}) or 'q' to quit: ").strip()
+                if choice.lower() == 'q':
+                    return False
+
+                index = int(choice) - 1
+                if 0 <= index < min(20, len(self.media_items)):
+                    selected_item = self.media_items[index]
+                    return self.start_recording(selected_item)
+                print(f"Please enter a number between 1 and {min(20, len(self.media_items))}")
+            except ValueError:
+                print("Please enter a valid number or 'q'")
+
+    def start_recording(self, media_item):
+        """Start recording the selected media item."""
+        if isinstance(media_item, dict):
+            title = media_item.get('title', media_item.get('name', 'Unknown'))
+            url = media_item.get('url', '')
+        else:
+            title = str(media_item)
+            url = str(media_item)
+
+        print(f"\nStarting recording for: {title}")
+        print(f"URL: {url}")
+
+        # Get recording directory
+        rec_dir = input("Enter recording directory (default: /tmp): ").strip()
+        if not rec_dir:
+            rec_dir = "/tmp"
+
+        # Get buffering setting
+        buffering_input = input("Enter buffering segments (default: 5): ").strip()
+        try:
+            buffering = int(buffering_input) if buffering_input else 5
+        except ValueError:
+            buffering = 5
+
+        # Prepare start command
+        args = {
+            "url": url,
+            "rec_dir": rec_dir,
+            "show_ads": False,
+            "buffering": buffering
+        }
+
+        # Add provider information if we have a selected provider
+        if self.selected_provider:
+            args["provider"] = {"provider_id": self.selected_provider["provider_id"]}
+            # Add data_dir if available (use a default for testing)
+            args["data_dir"] = str(Path.home() / "streamingserver_data")
+
+        print("\nSending start command...")
+        print(f"Recording to: {rec_dir}")
+        print(f"Buffering: {buffering} segments")
+
+        # Send start command (no response expected)
+        self.send_command("start", args)
+
+        print("Recording started! Use menu option 9 to stop recording.")
+        print("Check server logs for recording status.")
+        return True
+
+    def stop_recording(self):
+        """Stop the current recording."""
+        print("\nSending stop command...")
+        self.send_command("stop")
+        print("Stop command sent! Check server logs for confirmation.")
+        return True
+
+    def main_menu(self):
+        """Display the main menu and handle user choices."""
+        while True:
+            print("\n" + "=" * 50)
+            print("NAVIGATOR - Provider Testing Menu")
+            print("=" * 50)
+            print("1. Get Providers")
+            print("2. Select Provider")
+            print("3. Get Categories")
+            print("4. Select Category")
+            print("5. Get Media Items")
+            print("6. Select Media Item")
+            print("7. Show Current Selection")
+            print("8. Reset Selection")
+            print("9. Record Selected Media Item")
+            print("10. Stop Recording")
+            print("q. Quit")
+
+            choice = input("\nEnter your choice: ").strip().lower()
+
+            if choice == '1':
+                self.get_providers()
+            elif choice == '2':
+                self.select_provider()
+            elif choice == '3':
+                self.get_categories()
+            elif choice == '4':
+                self.select_category()
+            elif choice == '5':
+                self.get_media_items()
+            elif choice == '6':
+                self.select_media_item()
+            elif choice == '7':
+                self.show_current_selection()
+            elif choice == '8':
+                self.reset_selection()
+            elif choice == '9':
+                self.record_media_item()
+            elif choice == '10':
+                self.stop_recording()
+            elif choice == 'q':
+                break
+            else:
+                print("Invalid choice. Please try again.")
+
+    def show_current_selection(self):
+        """Show the current selection status."""
+        print("\n" + "-" * 30)
+        print("CURRENT SELECTION:")
+        print("-" * 30)
+        if self.selected_provider:
+            print(f"Provider: {self.selected_provider.get('name', 'Unknown')}")
+        else:
+            print("Provider: None")
+
+        if self.selected_category:
+            category_name = self.selected_category if isinstance(self.selected_category, str) else self.selected_category.get('name', 'Unknown')
+            print(f"Category: {category_name}")
+        else:
+            print("Category: None")
+
+        if self.selected_media_item:
+            if isinstance(self.selected_media_item, dict):
+                title = self.selected_media_item.get('title', self.selected_media_item.get('name', 'Unknown'))
+            else:
+                title = str(self.selected_media_item)
+            print(f"Media Item: {title}")
+        else:
+            print("Media Item: None")
+
+        print(f"Available providers: {len(self.providers)}")
+        print(f"Available categories: {len(self.categories)}")
+        print(f"Available media items: {len(self.media_items)}")
+
+    def reset_selection(self):
+        """Reset all selections."""
+        self.selected_provider = None
+        self.selected_category = None
+        self.selected_media_item = None
+        self.providers = []
+        self.categories = []
+        self.media_items = []
+        print("Selection reset")
+
+    def disconnect(self):
+        """Disconnect from the server."""
+        if self.socket:
+            self.socket.close()
+            print("Disconnected from server")
+
+    def run(self):
+        """Run the navigator application."""
+        print("Navigator - Socket Client for Provider Testing")
+        print("=" * 50)
+
+        if self.connect():
+            try:
+                self.main_menu()
+            except KeyboardInterrupt:
+                print("\n\nInterrupted by user")
+            finally:
+                self.disconnect()
+        else:
+            sys.exit(1)
+
+
+def main():
+    """Main entry point."""
+    # Kill any previously running navigator instances
+    try:
+        # Get current process ID to avoid killing ourselves
+        current_pid = os.getpid()
+        print(f"Current navigator instance PID: {current_pid}")
+
+        # Find and kill other navigator.py processes
+        cmd = ["pgrep", "-f", "python.*navigator.py"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            for pid in result.stdout.strip().split('\n'):
+                if pid and int(pid) != current_pid:
+                    print(f"Killing previous navigator instance with PID: {pid}")
+                    try:
+                        subprocess.run(["kill", "-9", pid], check=False)
+                    except Exception as e:
+                        print(f"Error killing process {pid}: {e}")
+
+        print("Starting new navigator instance...")
+    except Exception as e:
+        print(f"Error handling previous instances: {e}")
+
+    parser = argparse.ArgumentParser(description="Navigator - Socket Client for Provider Testing")
+    parser.add_argument('--host', default='localhost', help='Server host (default: localhost)')
+    parser.add_argument('--port', type=int, default=5000, help='Server port (default: 5000)')
+    args = parser.parse_args()
+
+    navigator = Navigator(args.host, args.port)
+    navigator.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -2,16 +2,17 @@
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
 """
-HLS Segment Downloader and Recorder
+HLS Live Stream Recorder
 
-This script provides the core functionality for downloading HLS (HTTP Live Streaming)
-streams, processing the segments, and recording them to a file. It handles
-playlist parsing, segment downloading, decryption, and timestamp correction to
-create a continuous MPEG-TS file.
+This module handles live HLS streams that continuously update their playlists.
+It monitors the playlist for new segments, downloads them, and creates a
+continuous MPEG-TS file.
 
-The recording process can be controlled via a socket-based command server,
-allowing for dynamic start and stop commands.
+Live streams are identified by the absence of the #EXT-X-ENDLIST tag, indicating
+that new segments will be added over time.
 """
+
+from __future__ import annotations
 
 import re
 import time
@@ -19,9 +20,8 @@ import threading
 import traceback
 import glob
 import subprocess
+from typing import TYPE_CHECKING
 import m3u8
-
-from socket_server import SocketServer
 from hls_playlist_utils import get_master_playlist, get_playlist
 from ffmpeg_utils import terminate_ffmpeg_process
 from log_utils import write_log
@@ -29,31 +29,33 @@ from session_utils import get_session
 from hls_segment_processor import HLSSegmentProcessor
 from debug import get_logger
 
+if TYPE_CHECKING:
+    from socket_server import SocketServer
+
 logger = get_logger(__file__)
 
 
-class HLS_Recorder:
+class HLS_Recorder_Live:
     socketserver: SocketServer | None
 
     """
-    Manages the HLS recording lifecycle for a single stream.
+    Manages the HLS recording lifecycle for live streams.
 
-    This class handles the entire process from fetching the master playlist to
-    downloading and processing individual segments. It maintains the recording
-    state, manages a persistent HTTP session, and orchestrates the complex
-    tasks of timestamp synchronization and discontinuity handling.
+    This class handles live HLS streams by continuously monitoring the playlist
+    for new segments, downloading and processing them in real-time. It maintains
+    the recording state, manages a persistent HTTP session, and handles playlist
+    reloading and error recovery.
 
     Attributes:
         is_running (bool): True if a recording is currently active.
         stop_event (threading.Event): Event used to signal the recording loop to stop.
         channel_uri (str): The URI of the HLS stream being recorded.
         socketserver (SocketServer): A reference to the command server.
-        segment_processor (HLSSegmentProcessor): The processor for processing an HLS segment.
         session (requests.Session): The session object for making HTTP requests.
     """
 
     def __init__(self):
-        """Initializes the HLS_Recorder instance."""
+        """Initializes the HLS_Recorder_Live instance."""
         self.is_running = False
         self.stop_event = threading.Event()
         self.channel_uri = ""
@@ -62,7 +64,9 @@ class HLS_Recorder:
 
     def record_stream(self, channel_uri, rec_dir, buffering):
         """
-        The main recording loop for an HLS stream.
+        The main recording loop for a live HLS stream.
+
+        Continuously monitors the playlist for new segments and processes them.
         """
         logger.info("channel_uri: %s, rec_dir: %s", channel_uri, rec_dir)
         self.is_running = True
@@ -154,9 +158,9 @@ class HLS_Recorder:
             self.is_running = False
             logger.info("Recording stopped")
 
-    def start(self, channel_uri, rec_dir, show_ads, buffering):
+    def start(self, channel_uri, rec_dir, show_ads, buffering, auth_tokens=None, original_page_url=None, all_sources=None):
         """
-        Starts the recording process in a new thread.
+        Starts the live recording process in a new thread.
 
         This method sets up the recording environment, cleans up old files,
         and launches the `record_stream` method in a background thread to
@@ -167,10 +171,19 @@ class HLS_Recorder:
             rec_dir (str): The directory of the output recording file.
             show_ads (bool): Show ads (true) or fillers (false)
             buffering (int): Number of segments to be buffered
+            auth_tokens (dict | None): Authentication tokens (headers, cookies) for protected streams
+            original_page_url (str | None): Original page URL for fallback/debugging
+            all_sources (list | None): All available sources for potential fallbacks
         """
         logger.info("#" * 70)
-        logger.info("Starting HLS recording for channel: %s", channel_uri)
+        logger.info("Starting live HLS recording for channel: %s", channel_uri)
         logger.info("#" * 70)
+
+        # Store authentication tokens and metadata
+        self.auth_tokens = auth_tokens
+        self.original_page_url = original_page_url
+        self.all_sources = all_sources
+
         self.stop()
 
         if not show_ads:

@@ -7,9 +7,7 @@ import signal
 import time
 import threading
 import traceback
-import argparse
 
-from hls_recorder import HLS_Recorder
 from socket_server import SocketServer, CommandHandler
 from debug import get_logger
 
@@ -18,10 +16,9 @@ logger = get_logger(__file__)
 
 def shutdown_handler(signum, _frame):
     logger.debug(f"Received signal {signum}, shutting down...")
-    global recorder, socketserver  # pylint: disable=global-variable-not-assigned
-    if 'recorder' in globals() and recorder is not None:
-        recorder.stop()
+    global socketserver  # pylint: disable=global-variable-not-assigned
     if 'socketserver' in globals() and socketserver is not None:
+        # Let the socket server handle stopping any active recorder
         socketserver.shutdown()
         socketserver.server_close()
     sys.exit(0)
@@ -29,42 +26,29 @@ def shutdown_handler(signum, _frame):
 
 def main():
     """
-    Main function to run the HLS recorder and command server.
+    Main function to run the command server.
 
-    This function parses command-line arguments, initializes the HLS_Recorder,
-    and starts a socket server to listen for commands. It can also start a
-    recording immediately if a channel is provided via arguments.
+    This function starts a socket server to listen for commands.
     """
     logger.info("*" * 70)
-    logger.info("HLS Recorder")
+    logger.info("Streaming Server")
     logger.info("*" * 70)
     # Ensure shutdown handler is registered for SIGTERM and SIGINT
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
-    parser = argparse.ArgumentParser(description="HLS Recorder")
-    parser.add_argument('--rec_dir', type=str, default='/tmp', help='Recording directory (default /tmp')
-    parser.add_argument('--channel', type=str, default='https://None', help='Channel ID or URL')
-    parser.add_argument('--show_ads', action='store_true', help='Whether to show ads (default: False)')
-    parser.add_argument('--buffering', type=str, default='5', help='Buffering number of segments beore playback start')
-    args = parser.parse_args()
-
-    global recorder, socketserver  # pylint: disable=global-variable-undefined
-    recorder = HLS_Recorder()
+    global socketserver  # pylint: disable=global-variable-undefined
     socketserver = None
 
     try:
         # Start socket server in background thread
         HOST, PORT = "0.0.0.0", 5000
-        socketserver = SocketServer((HOST, PORT), CommandHandler, recorder)
-        recorder.socketserver = socketserver
+        socketserver = SocketServer((HOST, PORT), CommandHandler)
         socketserver_thread = threading.Thread(target=socketserver.serve_forever, daemon=True)
         socketserver_thread.start()
         logger.debug("Command socket server running on %s:%s", HOST, PORT)
         logger.debug("Ready for commands. Use 'start', 'stop' via socket.")
-        if args.channel != "https://None":
-            logger.debug("Press Ctrl+C to exit.")
-            recorder.start(args.channel, args.rec_dir, args.show_ads, args.buffering)
+        logger.debug("Press Ctrl+C to exit.")
         while True:
             time.sleep(1)
 
