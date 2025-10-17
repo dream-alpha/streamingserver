@@ -8,7 +8,8 @@ import threading
 import datetime
 import urllib.parse
 from pathlib import Path
-import requests
+from auth_utils import get_headers
+from session_utils import get_session
 # from debug import get_logger
 
 # logger = get_logger(__file__)
@@ -21,6 +22,11 @@ class Provider():
         self.cache_file = self.data_dir / "cache.json"
         self._update_thread = None
         self._stop_event = threading.Event()
+
+        # Create session for HTTP requests
+        self.session = get_session()
+        self.session.headers.update(get_headers("browser"))
+
         self.update_channel_data()
 
     def get_categories(self):
@@ -186,7 +192,7 @@ class Provider():
         )
         url = f"http://api.pluto.tv/v2/channels?start={start}&stop={stop}"
         # logger.debug("url: %s", url)
-        response = requests.get(url, timeout=5)
+        response = self.session.get(url, timeout=5)
         response.raise_for_status()
         # Store as pretty-printed JSON
         try:
@@ -239,13 +245,3 @@ class Provider():
         )
 
         return updated_url
-
-
-def main():
-    data_dir = Path("/root/plugins/streamingserver/data")
-    pluto = Provider("PlutoTV", data_dir)
-    pluto.update_channel_data()  # Start background updates
-
-
-if __name__ == "__main__":
-    main()

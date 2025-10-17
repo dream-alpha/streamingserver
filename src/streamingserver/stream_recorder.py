@@ -1,100 +1,152 @@
+#!/usr/bin/env python3
 # Copyright (C) 2018-2025 by dream-alpha
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
 """
-Stream Recorder
+Recorder Manager
+Just start/stop different recorder types with thread safety
 """
-
 from __future__ import annotations
-from typing import TYPE_CHECKING
+
+# Import recorder classes
+from base_recorder import BaseRecorder
 from mp4_recorder import MP4_Recorder
-from hls_switch import HLS_Switch
-from stream_utils import detect_stream_type
+from hls_recorder_basic import HLS_Recorder_Basic
+from hls_recorder_live import HLS_Recorder_Live
+from hls_recorder_m4s import HLS_Recorder_M4S
+
+# Setup logging
 from debug import get_logger
-
-if TYPE_CHECKING:
-    from socket_server import SocketServer
-
 logger = get_logger(__file__)
 
 
 class StreamRecorder:
+    """Manages single active recorder - ensures only one runs at a time"""
 
     def __init__(self):
-        """Initializes the StreamRecorder instance."""
-        self.server: SocketServer | None = None
-        self.mp4_recorder: MP4_Recorder | None = None
-        self.hls_switch: HLS_Switch | None = None
+        self.current_recorder: BaseRecorder | None = None
+        self.recorder_types = {
+            'mp4': MP4_Recorder,
+            'hls_basic': HLS_Recorder_Basic,
+            'hls_live': HLS_Recorder_Live,
+            'hls_m4s': HLS_Recorder_M4S
+        }
 
-    def record_stream(self, channel_uri, rec_dir, show_ads, buffering, auth_tokens=None, original_page_url=None, all_sources=None):
+    def start_recorder(self, recorder_type: str, resolve_result: dict) -> bool:
+        """Start recorder by type name - stops current recorder and waits"""
+        if recorder_type not in self.recorder_types:
+            logger.error(f"Unknown recorder type: {recorder_type}")
+            return False
+
+        # Stop current recorder and wait for it to fully stop
+        if self.current_recorder and self.current_recorder.is_running:
+            logger.info(f"Stopping current {self.current_recorder.name} before starting {recorder_type}...")
+            if not self.stop():
+                logger.error("Failed to stop current recorder")
+                return False
+            logger.info("Current recorder fully stopped, starting new one...")
+
+        recorder_class = self.recorder_types[recorder_type]
+        self.current_recorder = recorder_class()
+        return self.current_recorder.start_thread(resolve_result)
+
+    def stop(self) -> bool:
+        """Stop current recorder and wait until it's fully stopped"""
+        if self.current_recorder and self.current_recorder.is_running:
+            logger.info(f"Stopping {self.current_recorder.name} and waiting for completion...")
+            success = self.current_recorder.stop()  # This already waits with thread.join()
+            if success:
+                logger.info(f"{self.current_recorder.name} has fully stopped")
+            return success
+        return True
+
+    def status(self) -> str:
+        """Get current status"""
+        if self.current_recorder and self.current_recorder.is_running:
+            return f"Running: {self.current_recorder.name}"
+        return "No recorder running"
+
+    def get_available_types(self) -> list:
+        """Get list of available recorder types"""
+        return list(self.recorder_types.keys())
+
+    def record_stream(self, resolve_result):
         """
         The main stream recording selection.
-        Expects channel_uri to be an already resolved streaming URL.
+        Expects resolve_result to contain all necessary data including resolved URL,
+        auth data, recording directory, and settings.
 
         Args:
-            channel_uri (str): Resolved streaming URL
-            rec_dir (str): Recording directory
-            show_ads (bool): Whether to show ads
-            buffering (int): Buffering settings
-            auth_tokens (dict | None): Authentication tokens (headers, cookies) for protected streams
-            original_page_url (str | None): Original page URL for fallback/debugging
-            all_sources (list | None): All available sources for potential fallbacks
+            resolve_result (dict): Complete resolver result with resolved_url, auth_tokens,
+                                 rec_dir, show_ads, buffering, etc.
         """
-        logger.info("Recording stream - URI: %s, Directory: %s", channel_uri, rec_dir)
+        # Extract data from resolve_result
+        channel_uri = resolve_result.get("resolved_url")
+        auth_tokens = resolve_result.get("auth_tokens")
+        original_page_url = resolve_result.get("original_url")
+        resolver_name = resolve_result.get("resolver")
+        recorder_id = resolve_result.get("recorder_id")
+        rec_dir = resolve_result.get("rec_dir", "/tmp")
+        # show_ads and buffering passed via resolve_result to sub-recorders
 
+        logger.info("Recording stream - URI: %s, Directory: %s", channel_uri, rec_dir)
+        if resolver_name:
+            logger.info("Using %s resolver", resolver_name)
         if auth_tokens:
             logger.info("Authentication tokens provided for protected stream")
         if original_page_url:
             logger.info("Original page URL: %s", original_page_url)
-        if all_sources:
-            logger.info("All sources available: %d alternatives", len(all_sources))
 
-        stream_type = detect_stream_type(channel_uri)
-        match stream_type:
-            case "HLS" | "HLS_M4S":
-                # Route all HLS streams (standard and M4S) through HLS_Switch
-                # The switch will analyze and route to the appropriate specialized recorder
-                logger.info("Detected %s stream, routing through HLS_Switch", stream_type)
-                self.hls_switch = HLS_Switch(self.server)
-                logger.info("DEBUG: Creating HLS_Switch with socketserver: %s", self.server)
+        # Use recorder_id for direct recorder selection
+        if not recorder_id:
+            logger.error("No recorder_id specified in resolve_result - this is required!")
+            logger.error("All resolvers must specify a recorder_id (mp4, hls_basic, hls_live, hls_m4s)")
+            return
 
-                self.hls_switch.hls_switch(
-                    channel_uri,
-                    rec_dir,
-                    show_ads,
-                    buffering,
-                    auth_tokens,
-                    original_page_url,
-                    all_sources,
-                )
-            case "DASH":
-                logger.info("Detected DASH stream: %s", channel_uri)
-                # TODO: Implement DASH recorder
-            case "MP4":
-                logger.info("Detected MP4 stream: %s", channel_uri)
-                self.mp4_recorder = MP4_Recorder()
-                self.mp4_recorder.socketserver = self.server
+        logger.info("Using recorder: %s (specified by resolver)", recorder_id)
+        self.start_recorder(recorder_id, resolve_result)
 
-                self.mp4_recorder.start(channel_uri, rec_dir, show_ads, buffering, auth_tokens, original_page_url, all_sources)
-            case "WebM":
-                logger.info("Detected WebM stream: %s", channel_uri)
-                # TODO: Implement WebM recorder
-            case "TS":
-                logger.info("Detected TS stream: %s", channel_uri)
-                # TODO: Implement TS recorder
-            case "HTML webpage":
-                logger.error("Received HTML webpage URL instead of video stream: %s", channel_uri)
-                logger.error("This indicates the URL was not properly resolved upstream")
-                logger.error("Please ensure URL resolution happens before calling stream_recorder")
-            case _:
-                logger.warning("Unknown or unsupported stream type: %s (URL: %s)", stream_type, channel_uri)
 
-    def stop(self):
-        """Stops the active recorder."""
-        logger.info("Stopping stream recorder...")
-        if self.mp4_recorder is not None:
-            self.mp4_recorder.stop()
-            self.mp4_recorder = None
-        if self.hls_switch is not None:
-            self.hls_switch.stop()
-            self.hls_switch = None
+def main():
+    """Command line interface"""
+    manager = StreamRecorder()
+
+    logger.info("Stream Recorder")
+    available_types = ", ".join(manager.get_available_types())
+    logger.info(f"Commands: {available_types}, stop, status, quit")
+
+    while True:
+        try:
+            cmd = input("\n> ").strip().lower()  # pylint: disable=bad-builtin
+
+            if cmd in manager.get_available_types():
+                # Create a test resolve_result for demo purposes
+                test_resolve_result = {
+                    'resolved_url': 'http://httpbin.org/status/200',  # Test URL
+                    'rec_dir': '/tmp',
+                    'auth_tokens': None,
+                    'session': None,
+                    'original_url': 'http://example.com',
+                    'all_sources': [],
+                    'recorder_id': cmd
+                }
+                logger.info("=" * 50)
+                manager.record_stream(test_resolve_result)
+            elif cmd == "stop":
+                manager.stop()
+            elif cmd == "status":
+                logger.info(manager.status())
+            elif cmd == "quit":
+                manager.stop()
+                break
+            else:
+                logger.info(f"Commands: {available_types}, stop, status, quit")
+
+        except KeyboardInterrupt:
+            logger.info("\nShutting down...")
+            manager.stop()
+            break
+
+
+if __name__ == "__main__":
+    main()

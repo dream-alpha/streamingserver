@@ -3,3 +3,4 @@ requests
 pycryptodome
 beautifulsoup4
 cloudscraper
+brotli

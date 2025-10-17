@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2025 by dream-alpha
+# License: GNU General Public License v3.0 (see LICENSE file for details)
+
 """
 HLS Segment Processing Utilities
 
@@ -18,13 +21,14 @@ logger = get_logger(__file__)
 
 
 class HLSSegmentProcessor:
-    def __init__(self, rec_dir, socketserver, playlist_base_url=None):
+    def __init__(self, rec_dir, socketserver, playlist_base_url=None, recorder_type=None):
         self.rec_dir = rec_dir
-        self.rec_file = rec_dir + "/pluto.ts"
         self.socketserver = socketserver
         self.playlist_base_url = playlist_base_url
-        logger.info("DEBUG: HLSSegmentProcessor initialized with socketserver: %s", socketserver)
-        logger.info("DEBUG: Playlist base URL: %s", playlist_base_url)
+        self.recorder_type = recorder_type or "hls_unknown"
+        logger.info("HLSSegmentProcessor initialized with socketserver: %s", socketserver)
+        logger.info("Playlist base URL: %s", playlist_base_url)
+        logger.info("Recorder type: %s", self.recorder_type)
         # State variables
         self.segment_index = 0
         self.previous_segment_index = -1
@@ -61,7 +65,7 @@ class HLSSegmentProcessor:
         # If we have a base URL, join the relative URI with it
         if self.playlist_base_url:
             resolved_url = urljoin(self.playlist_base_url, segment_uri)
-            logger.info("DEBUG: Joined '%s' with base '%s' = '%s'", segment_uri, self.playlist_base_url, resolved_url)
+            logger.info("Joined '%s' with base '%s' = '%s'", segment_uri, self.playlist_base_url, resolved_url)
             return resolved_url
 
         # Fallback: return original URI (will likely fail but better than crashing)
@@ -73,7 +77,7 @@ class HLSSegmentProcessor:
 
         # Resolve relative segment URLs to absolute URLs
         segment_url = self._resolve_segment_url(segment.uri)
-        logger.info("DEBUG: Resolved segment URL: %s", segment_url)
+        logger.info("Resolved segment URL: %s", segment_url)
 
         new_section = False
         key_info = {"METHOD": None, "URI": None, "IV": None}
@@ -120,11 +124,17 @@ class HLSSegmentProcessor:
                 logger.info("Removed section file %s to insert bumper", self.section_file)
                 append_to_rec_file(self.section_file, bumper_data)
                 if self.socketserver:
-                    logger.info("DEBUG: Broadcasting bumper file message")
-                    self.socketserver.broadcast(["start", {"url": "bumper-file", "rec_file": self.section_file, "section_index": self.section_index, "segment_index": self.previous_segment_index}])
-                    logger.info("DEBUG: Bumper file broadcast complete")
+                    logger.info("Broadcasting bumper file message")
+                    self.socketserver.broadcast(["start", {
+                        "url": "bumper-file",
+                        "rec_file": self.section_file,
+                        "section_index": self.section_index,
+                        "segment_index": self.previous_segment_index,
+                        "recorder": {"type": self.recorder_type}
+                    }])
+                    logger.info("Bumper file broadcast complete")
                 else:
-                    logger.warning("DEBUG: No socketserver available for bumper file broadcast")
+                    logger.warning("No socketserver available for bumper file broadcast")
 
         if new_section:
             logger.info("=" * 70)
@@ -166,13 +176,19 @@ class HLSSegmentProcessor:
         logger.info("Writing segment %s, %s to %s", self.segment_index, segment.uri, self.section_file)
 
         if self.segment_index == buffering:
-            logger.info("DEBUG: Buffering reached (%d), checking socketserver: %s", buffering, self.socketserver)
+            logger.info("Buffering reached (%d), checking socketserver: %s", buffering, self.socketserver)
             if self.socketserver:
-                logger.info("DEBUG: Broadcasting start message for segment %d", self.segment_index)
-                self.socketserver.broadcast(["start", {"url": segment.uri, "rec_file": self.section_file, "section_index": self.section_index, "segment_index": self.segment_index}])
-                logger.info("DEBUG: Broadcast complete")
+                logger.info("Broadcasting start message for segment %d", self.segment_index)
+                self.socketserver.broadcast(["start", {
+                    "url": segment.uri,
+                    "rec_file": self.section_file,
+                    "section_index": self.section_index,
+                    "segment_index": self.segment_index,
+                    "recorder": {"type": self.recorder_type}
+                }])
+                logger.info("Broadcast complete")
             else:
-                logger.warning("DEBUG: No socketserver available for broadcast")
+                logger.warning("No socketserver available for broadcast")
             if not self.buffering_completed:
                 self.buffering_completed = True
                 logger.info("Buffering completed.")

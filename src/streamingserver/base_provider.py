@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (C) 2018-2025 by dream-alpha
+# License: GNU General Public License v3.0 (see LICENSE file for details)
+
 """
 Base Provider Class
 
@@ -18,7 +21,9 @@ logger = get_logger(__file__)
 class BaseProvider:
     """Base class for provider implementations"""
 
-    def __init__(self):
+    def __init__(self, provider_id=None, data_dir=None):
+        self.provider_id = provider_id or ""
+        self.data_dir = data_dir or ""
         self.name = ""
         self.title = ""
         self.base_url = ""
@@ -44,7 +49,7 @@ class BaseProvider:
         """Resolve video page to streaming URLs"""
         raise NotImplementedError
 
-    def resolve_url(self, url: str, resolution: str = "best") -> str:
+    def resolve_url(self, url: str, quality: str = "best") -> str:
         """
         Resolve video page URL to streaming URL with quality selection
         Called by socket server for recording
@@ -65,7 +70,7 @@ class BaseProvider:
 
                 # Find requested quality or use best (first in list)
                 for video_url_info in video_urls:
-                    if resolution == "best" or video_url_info.get("quality") == resolution:
+                    if quality == "best" or video_url_info.get("quality") == quality:
                         streaming_url = video_url_info.get("url", "")
                         if streaming_url:
                             logger.info("Selected %s quality for recording", video_url_info.get("quality", "unknown"))

@@ -12,114 +12,96 @@ from __future__ import annotations
 import os
 import time
 import threading
-import subprocess
-import glob
 import requests
+from base_recorder import BaseRecorder
+from string_utils import format_size
+from auth_utils import apply_auth_tokens_to_session
 from debug import get_logger
 
 
 logger = get_logger(__file__)
 
 
-class MP4_Recorder:
+class MP4_Recorder(BaseRecorder):
     """Direct MP4 recorder for streaming server"""
 
     def __init__(self):
         """Initialize the MP4 recorder"""
-        self.is_running = False
-        self.stop_event = threading.Event()
-        self.video_url = ""
-        self.socketserver = None
-        self.download_thread = None
+        super().__init__(self.__class__.__name__)  # Pass name to parent class
+        # Recording state - no thread management needed
         self.progress = 0
         self.total_size = 0
         self.downloaded_size = 0
-        self.output_file = ""
+        self.playback_timer = None
 
-    def _start_playback(self):
+    def record_start(self, resolve_result):
         """
-        Function called by timer after 3 seconds to start playback
-        This can be used to signal that recording has started and playback can begin
-        """
-        logger.info("Playback started after 3-second delay")
-
-        # Notify client that playback can start
-        if self.socketserver:
-            self.socketserver.broadcast(["start", {"url": self.video_url, "rec_file": self.output_file, "section_index": 0, "segment_index": 0}])
-
-    def start(self, video_url, rec_dir, _show_ads=False, _buffering=0, auth_tokens=None, original_page_url=None, all_sources=None):
-        """
-        Start MP4 recording
+        Setup MP4 recording parameters (called from record_start)
 
         Args:
-            video_url (str): Direct MP4 URL
-            rec_dir (str): Output directory
-            auth_tokens (dict | None): Authentication tokens (headers, cookies) for protected streams
-            original_page_url (str | None): Original page URL for fallback/debugging
-            all_sources (list | None): All available sources for potential fallbacks
+            resolve_result (dict): Complete resolve result containing resolved_url,
+                                 rec_dir, show_ads, buffering, auth_tokens,
+                                 original_url, all_sources, socketserver, etc.
         """
-        logger.info("Starting MP4 recording for: %s", video_url)
+        super().record_start(resolve_result)  # Ensure parent cleanup
+        # Extract and setup recording parameters
+        self.video_url = resolve_result.get("resolved_url")
+        self.auth_tokens = resolve_result.get("auth_tokens")
+        self.original_page_url = resolve_result.get("original_url")
+        self.all_sources = resolve_result.get("all_sources")
+        self.session = resolve_result.get("session")  # Use consistent key name
+        self.rec_dir = resolve_result.get("rec_dir", "/tmp")
 
-        # Store authentication tokens and metadata
-        self.auth_tokens = auth_tokens
-        self.original_page_url = original_page_url
-        self.all_sources = all_sources
+        # Ensure session has the required auth tokens applied cleanly
+        if self.session and self.auth_tokens:
+            # Use centralized session auth token application with cookie deduplication
+            apply_auth_tokens_to_session(self.session, self.auth_tokens)
+        elif not self.session and self.auth_tokens:
+            # Create new session with auth tokens if none provided
+            self.session = requests.Session()
+            apply_auth_tokens_to_session(self.session, self.auth_tokens)
 
-        self.stop()
-
-        self.video_url = video_url
-
-        # Clean up old files
-        pattern = rec_dir + "/stream*"
-        subprocess.run(["rm", "-f"] + glob.glob(pattern), check=False)
-
-        while self.is_running:
-            logger.info("Recording is still running. waiting...")
-            time.sleep(0.5)
-
-        self.stop_event.clear()
-        self.download_thread = threading.Thread(
-            target=self.record_stream,
-            args=(video_url, rec_dir),
-            daemon=True
-        )
-        self.download_thread.start()
+        # Start the actual recording
+        self.record_stream(self.video_url, self.rec_dir)
 
     def record_stream(self, video_url, rec_dir):
         """
-        Main recording function for MP4 files
+        Main recording function for MP4 files - pure recording logic
 
         Args:
             video_url (str): Direct MP4 URL
             rec_dir (str): Output directory
         """
         logger.info("MP4 recording started: %s -> %s", video_url, rec_dir)
-        self.is_running = True
-
-        # Start a 3-second timer to invoke start_playback
-        playback_timer = threading.Timer(3.0, self._start_playback)
-        playback_timer.daemon = True
-        playback_timer.start()
 
         try:
-            # Set up output file
-            output_file = self.output_file = os.path.join(rec_dir, "stream_0.mp4")
+            output_file = os.path.join(rec_dir, "stream_0.mp4")
+
+            self.playback_timer = threading.Timer(3.0, self.start_playback, args=(video_url, output_file))
+            self.playback_timer.daemon = True
+            self.playback_timer.start()
+
             self._direct_download(video_url, output_file)
 
         except Exception as e:
             logger.error("MP4 recording error: %s", e)
-            if self.socketserver:
-                self.socketserver.broadcast([
-                    "stop", {
-                        "reason": "error",
-                        "message": str(e),
-                        "url": video_url,
-                        "rec_dir": rec_dir
-                    }
-                ])
-        finally:
-            self.is_running = False
-            logger.info("MP4 recording stopped")
+            raise  # Re-raise so BaseRecorder thread wrapper can handle it
+
+        if self.playback_timer and self.playback_timer.is_alive():
+            logger.info("Cancelling playback timer and sending start playback immediately")
+            self.playback_timer.cancel()
+            self.playback_timer = None
+            self.start_playback(video_url, output_file)
+
+        logger.info("MP4 recording completed successfully")
+
+    def on_thread_ended(self):
+        """Called when recording thread ends - cleanup timer"""
+        super().on_thread_ended()  # Call parent cleanup
+        if self.playback_timer and self.playback_timer.is_alive():
+            logger.info("Cancelling playback timer")
+            self.playback_timer.cancel()
+            self.playback_timer = None
 
     def _direct_download(self, url, output_file):
         """
@@ -129,28 +111,43 @@ class MP4_Recorder:
             url (str): MP4 file URL
             output_file (str): Output file path
 
-        Returns:
-            bool: True if download succeeded, False otherwise
         """
         try:
-            # Default headers
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Range": "bytes=0-",  # Support resumable downloads
-                "Referer": getattr(self, 'original_page_url', ''),
-            }
+            session = self.session
+            if not session:
+                raise ValueError("No session available for downloading")
 
-            # Clean up headers (remove empty values)
-            headers = {k: v for k, v in headers.items() if v}
+            # Log session headers for debugging
+            logger.info("Session headers for download: %s", dict(session.headers))
+            logger.info("Session cookies for download: %s", dict(session.cookies))
 
-            # Get file size first for progress reporting
-            session = requests.Session()
+            # Additional cookie debugging
+            if hasattr(session.cookies, '_cookies'):
+                logger.info("Session cookie jar details: %s", session.cookies._cookies)
 
+            # Check for duplicate cookie names
+            cookie_names = list(session.cookies.keys())
+            duplicate_names = [name for name in set(cookie_names) if cookie_names.count(name) > 1]
+            if duplicate_names:
+                logger.warning("Detected duplicate cookie names: %s", duplicate_names)
+
+            # Check if we have the critical xHamster headers
+            has_referer = any(k.lower() == 'referer' for k in session.headers.keys())
+            has_origin = any(k.lower() == 'origin' for k in session.headers.keys())
+            logger.info("Critical headers present - Referer: %s, Origin: %s", has_referer, has_origin)
+
+            if not has_referer or not has_origin:
+                logger.warning("Missing critical headers!")
+                # Try to add them from auth_tokens if available
+                if self.auth_tokens and self.auth_tokens.get("headers"):
+                    auth_headers = self.auth_tokens.get("headers", {})
+                    critical_headers = {'referer', 'origin'}
+                    for key, value in auth_headers.items():
+                        if key.lower() in critical_headers:
+                            logger.info("Adding missing header from auth_tokens: %s = %s", key, value)
+                            session.headers[key] = value
             try:
-                head_response = session.head(url, headers=headers, timeout=10)
+                head_response = session.head(url, timeout=10)
                 self.total_size = int(head_response.headers.get('Content-Length', 0))
             except Exception as e:
                 logger.warning("HEAD request failed: %s. Proceeding without file size.", e)
@@ -164,7 +161,13 @@ class MP4_Recorder:
                         f" of {self.total_size} bytes" if self.total_size > 0 else "")
 
             # Stream the download with progress reporting
-            with session.get(url, headers=headers, stream=True, timeout=60) as response:
+            with session.get(url, stream=True, timeout=60) as response:
+                if response.status_code == 403:
+                    logger.error("HTTP 403 Forbidden error when accessing video URL")
+                    logger.error("This usually indicates missing or incorrect headers (especially Referer)")
+                    logger.error("URL: %s", url[:100] + "..." if len(url) > 100 else url)
+                    logger.error("Session headers: %s", dict(session.headers))
+                    raise PermissionError(f"403 Forbidden - CDN access denied. URL: {url[:80]}...")
                 response.raise_for_status()
 
                 # Initialize variables for progress tracking
@@ -174,11 +177,7 @@ class MP4_Recorder:
 
                 with open(output_file, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
-                        if self.stop_event.is_set():
-                            logger.info("Download stopped by user")
-                            return False
-
-                        if chunk:
+                        if chunk and not self.stop_event.is_set():
                             f.write(chunk)
                             self.downloaded_size += len(chunk)
 
@@ -203,8 +202,8 @@ class MP4_Recorder:
 
                                     logger.info("Download progress: %d%% (%s/%s, %.2f MB/s)",
                                                 progress,
-                                                self._format_size(self.downloaded_size),
-                                                self._format_size(self.total_size),
+                                                format_size(self.downloaded_size),
+                                                format_size(self.total_size),
                                                 speed / 1024 / 1024)
 
             # Verify the download was successful
@@ -217,34 +216,13 @@ class MP4_Recorder:
                 # Log final 100% completion
                 final_size = os.path.getsize(output_file)
                 logger.info("Download progress: 100%% (%s/%s)",
-                            self._format_size(final_size),
-                            self._format_size(self.total_size) if self.total_size > 0 else self._format_size(final_size))
+                            format_size(final_size),
+                            format_size(self.total_size) if self.total_size > 0 else format_size(final_size))
                 logger.info("MP4 download completed successfully")
-                return True
+            else:
+                logger.error("Downloaded file is empty or missing")
+                super().on_thread_error(Exception("Downloaded file is empty or missing"))
 
-            logger.error("Downloaded file is empty or missing")
-            return False
-
-        except requests.RequestException as e:
-            logger.error("Direct MP4 download failed: %s", e)
-            return False
         except Exception as e:
-            logger.error("Unexpected error in direct MP4 download: %s", e)
-            return False
-
-    def _format_size(self, size_bytes):
-        """Format bytes as human-readable size"""
-        if size_bytes < 1024:
-            return f"{size_bytes} B"
-        if size_bytes < 1024 * 1024:
-            return f"{size_bytes / 1024:.1f} KB"
-        if size_bytes < 1024 * 1024 * 1024:
-            return f"{size_bytes / (1024 * 1024):.1f} MB"
-        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
-
-    def stop(self):
-        """Stop the recording"""
-        logger.info("Stopping MP4 recording...")
-        self.stop_event.set()
-        if self.download_thread and self.download_thread.is_alive():
-            self.download_thread.join(timeout=5)
+            logger.error("Error in direct MP4 download: %s", e)
+            raise

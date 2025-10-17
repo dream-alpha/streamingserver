@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (C) 2018-2025 by dream-alpha
+# License: GNU General Public License v3.0 (see LICENSE file for details)
+
 """
 Authentication Utilities
 
@@ -24,6 +27,21 @@ except ImportError:
 logger = get_logger(__file__)
 
 
+def get_random_user_agent() -> str:
+    """Generate a random realistic user agent string without creating a full AuthTokens instance."""
+    # Use a closure-based lazy initialization to avoid globals
+    if not hasattr(get_random_user_agent, '_cached_agents'):
+        get_random_user_agent._cached_agents = [
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/120.0",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+        ]
+
+    return random.choice(get_random_user_agent._cached_agents)
+
+
 class AuthTokens:
     """
     Container for authentication tokens and methods to acquire them.
@@ -35,12 +53,16 @@ class AuthTokens:
         self.cookies: dict[str, str] = {}
         self.method: str = ""
         self.last_successful_method: str | None = None
+        self.session: requests.Session | None = None
 
     def clear(self):
         """Clear all authentication data"""
         self.headers.clear()
         self.cookies.clear()
         self.method = ""
+        if self.session:
+            self.session.close()
+        self.session = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for compatibility"""
@@ -55,17 +77,6 @@ class AuthTokens:
         self.headers = auth_dict.get("headers", {}).copy()
         self.cookies = auth_dict.get("cookies", {}).copy()
         self.method = auth_dict.get("method", "")
-
-    def get_random_user_agent(self) -> str:
-        """Generate a random realistic user agent string"""
-        user_agents = [
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
-            "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/120.0",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-        ]
-        return random.choice(user_agents)
 
     def fetch_with_requests(self, url: str, domain: str | None = None) -> str | None:
         """
@@ -82,7 +93,7 @@ class AuthTokens:
             logger.info("Trying standard requests method for: %s", url)
 
             headers = {
-                "user-agent": self.get_random_user_agent(),
+                "user-agent": get_random_user_agent(),
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "accept-language": "en-US,en;q=0.9",
                 "accept-encoding": "gzip, deflate",
@@ -107,10 +118,11 @@ class AuthTokens:
 
             response.raise_for_status()
 
-            # Store auth tokens
+            # Store auth tokens and session
             self.headers = dict(response.request.headers)
             self.cookies = session.cookies.get_dict()
             self.method = "requests"
+            self.session = session  # Store the authenticated session for reuse
 
             logger.info("Standard requests method succeeded - captured %d cookies", len(self.cookies))
             return response.text
@@ -135,7 +147,7 @@ class AuthTokens:
             return None
 
         default_headers = {
-            'User-Agent': self.get_random_user_agent(),
+            'User-Agent': get_random_user_agent(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
@@ -163,10 +175,11 @@ class AuthTokens:
                 if k not in headers or not headers[k]:
                     headers[k] = v
 
-            # Store comprehensive auth tokens
+            # Store comprehensive auth tokens and session
             self.headers = headers
             self.cookies = cookies
             self.method = "cloudscraper"
+            self.session = scraper  # Store the authenticated session for reuse
 
             logger.info("Cloudscraper method succeeded - captured %d headers, %d cookies",
                         len(headers), len(cookies))
@@ -207,7 +220,7 @@ class AuthTokens:
 
             try:
                 # Enhanced headers to better mimic modern browser
-                user_agent = self.get_random_user_agent()
+                user_agent = get_random_user_agent()
 
                 # Build curl command with comprehensive browser simulation
                 cmd = [
@@ -353,30 +366,145 @@ class AuthTokens:
         logger.error("All authentication methods failed for: %s", url)
         return None
 
-    def format_for_ffmpeg(self, original_page_url: str = None) -> str:
-        """
-        Format authentication tokens for FFmpeg's -headers option.
 
-        Args:
-            original_page_url: Original page URL to use as Referer if not already set
+def get_headers(header_type: str = "standard") -> dict[str, str]:
+    """Get HTTP headers for different request types.
 
-        Returns:
-            Formatted headers string for FFmpeg
-        """
-        headers = self.headers.copy()
+    Args:
+        header_type: Type of headers to generate
+            - "standard": Standard web request headers
+            - "api": API-focused headers
+            - "browser": Full browser simulation headers
 
-        # Add Referer if original page URL is available and not already set
-        if original_page_url and 'Referer' not in headers:
-            headers['Referer'] = original_page_url
+    Returns:
+        dict: Headers with random user agent
+    """
+    base_headers = {
+        'User-Agent': get_random_user_agent(),
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+    }
 
-        # Add cookies as Cookie header
-        if self.cookies:
-            cookie_string = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
-            headers["Cookie"] = cookie_string
+    if header_type == "api":
+        base_headers['Accept'] = '*/*'
+    elif header_type == "browser":
+        base_headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+        })
+    else:  # "standard"
+        base_headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Upgrade-Insecure-Requests': '1',
+        })
 
-        # Format for FFmpeg
-        header_lines = [f"{k}: {v}" for k, v in headers.items()]
-        ffmpeg_headers = "\r\n".join(header_lines)
+    return base_headers
 
-        logger.info("Generated FFmpeg headers from %s method: %d headers", self.method, len(header_lines))
-        return ffmpeg_headers
+
+def apply_auth_tokens_to_session(session, auth_tokens):
+    """
+    Apply authentication tokens to a requests.Session with comprehensive cookie deduplication.
+
+    This function ensures clean session cookie management by:
+    1. Removing any existing Cookie headers from session to prevent duplicates
+    2. Filtering out Cookie headers from auth_tokens headers before applying them
+    3. Clearing existing session cookies completely
+    4. Setting new cookies from auth_tokens cookies dict
+
+    Args:
+        session (requests.Session): requests.Session object to update
+        auth_tokens (dict): Authentication tokens containing headers and cookies
+    """
+    if not session or not auth_tokens:
+        return
+
+    # Get auth data
+    auth_headers = auth_tokens.get("headers", {})
+    auth_cookies = auth_tokens.get("cookies", {})
+
+    # Apply headers (but filter out Cookie headers to prevent duplicates)
+    if auth_headers:
+        # Remove any existing Cookie headers from session to prevent duplicates
+        session.headers.pop('Cookie', None)
+        session.headers.pop('cookie', None)
+
+        # Filter out Cookie headers - we'll handle cookies separately
+        filtered_headers = {k: v for k, v in auth_headers.items() if k.lower() != 'cookie'}
+        logger.info("Updating session with auth headers: %s", list(filtered_headers.keys()))
+        session.headers.update(filtered_headers)
+
+    # Apply cookies with complete cleanup to avoid duplicates
+    if auth_cookies:
+        logger.info("Updating session with auth cookies: %s", list(auth_cookies.keys()))
+        # Completely clear all existing cookies to avoid any duplicates
+        session.cookies.clear()
+        # Also clear the cookie jar to ensure no residual cookies
+        if hasattr(session.cookies, '_cookies'):
+            session.cookies._cookies.clear()
+
+        # Set new cookies
+        for name, value in auth_cookies.items():
+            session.cookies[name] = value
+            logger.debug("Set cookie: %s = %s", name, value[:20] + "..." if len(str(value)) > 20 else value)
+
+
+def convert_auth_tokens_to_ffmpeg_headers(auth_tokens):
+    """
+    Convert auth_tokens to FFmpeg headers format with comprehensive cookie deduplication.
+
+    This function ensures that cookies are never duplicated by:
+    1. Extracting cookies from any existing Cookie headers in headers dict
+    2. Merging them with cookies from the cookies dict (cookies dict takes priority)
+    3. Filtering out all Cookie headers from regular headers
+    4. Creating a single consolidated Cookie header
+
+    Args:
+        auth_tokens (dict): Authentication tokens containing headers and cookies
+
+    Returns:
+        str: FFmpeg-formatted headers string, or None if no auth data
+    """
+    if not auth_tokens:
+        return None
+
+    headers = auth_tokens.get("headers", {})
+    cookies = auth_tokens.get("cookies", {})
+
+    if not headers and not cookies:
+        return None
+
+    # Consolidated cookie collection with deduplication
+    all_cookies = {}
+
+    # First, extract any cookies from existing Cookie headers and parse them
+    for key, value in headers.items():
+        if key.lower() == 'cookie' and value:
+            # Parse existing Cookie header: "name1=value1; name2=value2"
+            for cookie_pair in value.split(';'):
+                cookie_pair = cookie_pair.strip()
+                if '=' in cookie_pair:
+                    name, cookie_value = cookie_pair.split('=', 1)
+                    all_cookies[name.strip()] = cookie_value.strip()
+
+    # Then add/override with cookies from the cookies dict (higher priority)
+    if cookies:
+        all_cookies.update(cookies)
+
+    ffmpeg_headers = []
+
+    # Add regular headers (but skip ALL Cookie headers - we'll handle cookies separately)
+    for key, value in headers.items():
+        if value and key.lower() != 'cookie':  # Only add non-empty values and skip Cookie headers
+            ffmpeg_headers.append(f"{key}: {value}")
+
+    # Add consolidated cookies as a single Cookie header
+    if all_cookies:
+        cookie_string = "; ".join([f"{name}={value}" for name, value in all_cookies.items()])
+        ffmpeg_headers.append(f"Cookie: {cookie_string}")
+
+    return "\r\n".join(ffmpeg_headers) if ffmpeg_headers else None

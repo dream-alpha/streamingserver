@@ -2,11 +2,20 @@
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
 import json
+import time
 from pathlib import Path
 import socketserver
-from provider_manager import ProviderManager
-from stream_recorder import StreamRecorder
-from debug import get_logger
+
+try:
+    from provider_manager import ProviderManager
+    from resolver_manager import ResolverManager
+    from stream_recorder import StreamRecorder
+    from debug import get_logger
+except ImportError:
+    from .provider_manager import ProviderManager
+    from .resolver_manager import ResolverManager
+    from .stream_recorder import StreamRecorder
+    from .debug import get_logger
 
 logger = get_logger(__file__)
 
@@ -14,6 +23,7 @@ logger = get_logger(__file__)
 class CommandHandler(socketserver.BaseRequestHandler):
     def __init__(self, request, client_address, server):
         self.provider_manager = ProviderManager()
+        self.resolver_manager = ResolverManager()
         super().__init__(request, client_address, server)
 
     def handle(self):
@@ -45,11 +55,11 @@ class CommandHandler(socketserver.BaseRequestHandler):
                     provider_id = args.get("provider", {}).get("provider_id", None)
                     data_dir = args.get("data_dir", None)
                     if not data_dir:
-                        data_dir = Path.cwd() / "data"
-                    else:
-                        data_dir = Path(data_dir)
-                    data_dir.mkdir(parents=True, exist_ok=True)
-                    logger.info("data_dir: %s", data_dir)
+                        data_dir = "/tmp/data"
+                    if provider_id:
+                        data_dir = Path(data_dir) / provider_id
+                        data_dir.mkdir(parents=True, exist_ok=True)
+                        logger.info("data_dir: %s", data_dir)
 
                     if cmd == "start":
                         logger.info("Starting recording with args: %s", args)
@@ -57,81 +67,105 @@ class CommandHandler(socketserver.BaseRequestHandler):
                             self.server.recorder = StreamRecorder()
                             self.server.recorder.server = self.server
 
-                        url = args.get("url", "")
+                        resolver_instance = self.resolver_manager.get_resolver(provider_id)
 
-                        # Try to resolve URL if provider is available
-                        resolved_url = url
-                        auth_tokens = None
-                        original_page_url = None
-                        all_sources = None
+                        if resolver_instance and hasattr(resolver_instance, 'resolve_url'):
+                            logger.info("Resolving URL for recording: %s", args.get("url", ""))
+                            resolve_result = resolver_instance.resolve_url(args)
 
-                        provider_instance = self.provider_manager.get_provider(
-                            provider_id,
-                            data_dir
-                        )
-                        if provider_instance and hasattr(provider_instance, 'resolve_url'):
-                            logger.info("Resolving URL for recording: %s", url)
-                            resolution = args.get("resolution", "best")
-                            resolve_result = provider_instance.resolve_url(url, resolution)
+                            # Add metadata to resolve_result
+                            if resolve_result and resolve_result.get("resolved"):
+                                for key in args:
+                                    if key not in resolve_result:
+                                        resolve_result[key] = args[key]
+                                resolve_result["socketserver"] = self.server
+                                logger.info("Resolution successful: %s", resolve_result)
 
-                            # Handle enhanced result with auth tokens
-                            resolved_url = resolve_result.get("streaming_url", url)
-                            auth_tokens = resolve_result.get("auth_tokens")
-                            original_page_url = resolve_result.get("original_page_url", url)
-                            all_sources = resolve_result.get("all_sources")
-
-                            if resolved_url and resolved_url != url:
-                                logger.info("Resolved to streaming URL: %s", resolved_url[:100] + "..." if len(resolved_url) > 100 else resolved_url)
-                                if auth_tokens:
-                                    logger.info("Authentication tokens acquired for protected stream")
+                                self.server.recorder.record_stream(resolve_result)
                             else:
-                                logger.warning("URL resolution failed, using original URL")
-                                resolved_url = url
-                        else:
-                            logger.warning("Provider doesn't support URL resolution, using original URL")
+                                # Resolution failed
+                                logger.warning("URL resolution failed, stopping here.")
 
-                        self.server.recorder.record_stream(
-                            resolved_url,
-                            args.get("rec_dir", "/tmp"),
-                            args.get("show_ads", False),
-                            args.get("buffering", 5),
-                            auth_tokens=auth_tokens,
-                            original_page_url=original_page_url,
-                            all_sources=all_sources,
-                        )
                     elif cmd == "stop":
                         logger.info("Stopping recording")
-                        if self.server.recorder is not None:
-                            self.server.recorder.stop()
-                    elif cmd == "get_providers":
-                        response = ["get_providers", {"data": self.provider_manager.get_providers()}]
-                        logger.info("Sending providers: %s", response)
-                        self.request.sendall((json.dumps(response) + '\n').encode())
-                    elif cmd == "get_categories":
-                        categories = []
-                        if provider_id and data_dir:
-                            provider_instance = self.provider_manager.get_provider(
-                                provider_id,
-                                data_dir
-                            )
-                            if provider_instance:
-                                categories = provider_instance.get_categories()
-                        response = ["get_categories", {"data": categories}]
-                        # logger.info("Sending categories: %s", categories)
-                        self.request.sendall((json.dumps(response) + '\n').encode())
-                    elif cmd == "get_media_items":
-                        channels = []
-                        category = args.get("category", None)
-                        if provider_id and category and data_dir:
-                            provider_instance = self.provider_manager.get_provider(
-                                provider_id,
-                                data_dir
-                            )
-                            if provider_instance:
-                                channels = provider_instance.get_media_items(category)
-                        response = ["get_media_items", {"data": channels}]
-                        logger.info("Sending channels: %s", channels)
-                        self.request.sendall((json.dumps(response) + '\n').encode())
+                        try:
+                            if self.server.recorder is not None:
+                                self.server.recorder.stop()
+                        except Exception as e:
+                            logger.error("Error stopping recording: %s", e)
+                            error_response = ["stop", {"status": "error", "message": f"Failed to stop recording: {e}"}]
+                            self.request.sendall((json.dumps(error_response) + '\n').encode('utf-8'))
+
+                    elif cmd in {"get_providers", "get_categories", "get_media_items"}:
+                        try:
+                            provider_instance = None
+                            if provider_id and data_dir:
+                                provider_instance = self.provider_manager.get_provider(
+                                    provider_id,
+                                    data_dir
+                                )
+
+                            if cmd == "get_providers":
+                                try:
+                                    providers_data = self.provider_manager.get_providers()
+                                    response = ["get_providers", {"data": providers_data}]
+                                    logger.info("Sending providers: %s", response)
+                                    response_json = json.dumps(response, ensure_ascii=False)
+                                    self.request.sendall((response_json + '\n').encode('utf-8'))
+                                    # Ensure data is flushed
+                                    time.sleep(0.01)  # Small delay to ensure transmission
+                                    logger.debug("Providers response sent successfully")
+                                except Exception as e:
+                                    logger.error("Error sending providers response: %s", e)
+                                    error_response = ["error", {"message": f"Failed to get providers: {e}"}]
+                                    self.request.sendall((json.dumps(error_response) + '\n').encode('utf-8'))
+
+                            elif provider_instance:
+                                if cmd == "get_categories":
+                                    try:
+                                        categories = provider_instance.get_categories()
+                                        response = ["get_categories", {"data": categories}]
+                                        response_json = json.dumps(response, ensure_ascii=False)
+                                        self.request.sendall((response_json + '\n').encode('utf-8'))
+                                        time.sleep(0.01)  # Small delay to ensure transmission
+                                        logger.debug("Categories response sent successfully")
+                                    except Exception as e:
+                                        logger.error("Error getting categories: %s", e)
+                                        error_response = ["error", {"message": f"Failed to get categories: {e}"}]
+                                        self.request.sendall((json.dumps(error_response) + '\n').encode('utf-8'))
+
+                                elif cmd == "get_media_items":
+                                    try:
+                                        category = args.get("category", None)
+                                        media_items = provider_instance.get_media_items(category)
+                                        response = ["get_media_items", {"data": media_items}]
+                                        logger.info("Sending %d media_items", len(media_items) if media_items else 0)
+
+                                        # Test JSON serialization first
+                                        response_json = json.dumps(response, ensure_ascii=False)
+                                        response_size = len(response_json.encode('utf-8'))
+                                        logger.info("Response size: %d bytes", response_size)
+
+                                        # Send response
+                                        self.request.sendall((response_json + '\n').encode('utf-8'))
+                                        time.sleep(0.01)  # Small delay to ensure transmission
+                                        logger.info("Response sent successfully")
+                                    except Exception as e:
+                                        logger.error("Error getting media items: %s", e)
+                                        error_response = ["error", {"message": f"Failed to get media items: {e}"}]
+                                        self.request.sendall((json.dumps(error_response) + '\n').encode('utf-8'))
+                            elif cmd in {"get_categories", "get_media_items"}:
+                                # Provider instance not available
+                                logger.warning("Provider instance not available for command: %s", cmd)
+                                error_response = ["error", {"message": f"Provider not available for {cmd}"}]
+                                self.request.sendall((json.dumps(error_response) + '\n').encode('utf-8'))
+                        except Exception as e:
+                            logger.error("Error processing command %s: %s", cmd, e)
+                            error_response = ["error", {"message": f"Command processing failed: {e}"}]
+                            try:
+                                self.request.sendall((json.dumps(error_response) + '\n').encode('utf-8'))
+                            except Exception as send_error:
+                                logger.error("Failed to send error response: %s", send_error)
                     else:
                         logger.error("Unknown command: %s", cmd)
                 except Exception as e:

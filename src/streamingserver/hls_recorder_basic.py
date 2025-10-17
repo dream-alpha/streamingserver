@@ -2,64 +2,67 @@
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
 """
-Base HLS Recorder Class
+Basic HLS Recorder
 
-This module provides the base functionality that is common to all HLS recorder types.
-Specialized recorders inherit from this class and override specific methods to handle
-their unique requirements.
+This module provides a basic HLS recorder implementation that handles standard
+HLS streams. It supports both VOD and live streams with playlist monitoring,
+segment processing, and error recovery.
 """
 
 from __future__ import annotations
 
 import time
-import threading
 import traceback
-import glob
-import subprocess
-from typing import TYPE_CHECKING
 import m3u8
 from hls_playlist_utils import get_playlist
 from ffmpeg_utils import terminate_ffmpeg_process
 from log_utils import write_log
-from session_utils import get_session
 from hls_segment_processor import HLSSegmentProcessor
+from base_recorder import BaseRecorder
 from debug import get_logger
-
-if TYPE_CHECKING:
-    from socket_server import SocketServer
 
 logger = get_logger(__file__)
 
 
-class HLS_Recorder_Base:
+class HLS_Recorder_Basic(BaseRecorder):
     """
-    Base class for all HLS recorders.
+    Basic HLS recorder implementation.
 
-    This class provides common functionality like session management,
-    playlist fetching, and basic recording lifecycle. Specialized
-    recorders inherit from this and override specific methods.
+    This class provides a straightforward HLS recording implementation
+    that handles standard HLS streams with playlist fetching, segment
+    processing, and basic error recovery.
     """
 
     def __init__(self):
-        """Initializes the base HLS_Recorder instance."""
-        self.is_running = False
-        self.stop_event = threading.Event()
+        """Initializes the basic HLS_Recorder instance."""
+        super().__init__("HLS_Basic_Recorder")
         self.channel_uri = ""
-        self.socketserver = None
         self.session = None
 
-    def prepare_recording(self, channel_uri, rec_dir, show_ads):  # pylint: disable=unused-argument
+    def record_start(self, resolve_result):
         """
-        Prepare the recording environment.
-        Override this method in specialized recorders for type-specific preparation.
-        """
-        logger.info("Preparing recording for channel: %s", channel_uri)
-        self.channel_uri = channel_uri
+        Starts the recording process - BaseRecorder handles threading.
 
-        # Clean up old files
-        pattern = rec_dir + "/stream*"
-        subprocess.run(["rm", "-f"] + glob.glob(pattern), check=False)
-        logger.debug("Removed old files: %s", pattern)
+        Args:
+            resolve_result (dict): Complete resolve result containing resolved_url,
+                                 rec_dir, show_ads, buffering, auth_tokens,
+                                 original_url, all_sources, etc.
+        """
+        super().record_start(resolve_result)  # Ensure parent cleanup
+        # Extract data from resolve_result
+        self.channel_uri = resolve_result.get("resolved_url")
+        self.rec_dir = resolve_result.get("rec_dir", "/tmp")
+        self.buffering = resolve_result.get("buffering", 5)
+        self.session = resolve_result.get("session")
+
+        if not self.session:
+            raise ValueError("No session available for HLS recording")
+
+        logger.info("#" * 70)
+        logger.info("Starting HLS recording for channel: %s", self.channel_uri)
+        logger.info("#" * 70)
+
+        self.record_stream(self.channel_uri, self.rec_dir, self.buffering)
 
     def process_playlist_content(self, playlist_text):
         """
@@ -67,6 +70,36 @@ class HLS_Recorder_Base:
         Override this method in specialized recorders for type-specific processing.
         """
         return m3u8.loads(playlist_text)
+
+    def handle_master_playlist(self, playlist, base_url):
+        """
+        Handle master playlist by selecting the best quality stream.
+        Returns the URL of the selected media playlist.
+        """
+        if not playlist.playlists:
+            logger.error("Master playlist has no streams")
+            return None
+
+        # Sort streams by bandwidth (quality) - highest first
+        sorted_streams = sorted(playlist.playlists, key=lambda x: x.stream_info.bandwidth, reverse=True)
+
+        # Select the highest quality stream
+        best_stream = sorted_streams[0]
+        resolution = getattr(best_stream.stream_info, 'resolution', 'unknown')
+        bandwidth = best_stream.stream_info.bandwidth
+
+        logger.info("Master playlist detected with %d streams", len(playlist.playlists))
+        logger.info("Selected highest quality: %s, bandwidth: %d", resolution, bandwidth)
+
+        # Construct absolute URL for the selected stream
+        if best_stream.uri.startswith('http'):
+            return best_stream.uri
+        # Relative URL - construct absolute URL
+        if base_url.endswith('/'):
+            return base_url + best_stream.uri
+        # Extract directory from base_url
+        base_dir = '/'.join(base_url.split('/')[:-1])
+        return base_dir + '/' + best_stream.uri
 
     def should_reload_master_playlist(self, _playlist):
         """
@@ -89,7 +122,6 @@ class HLS_Recorder_Base:
         Specialized recorders can override specific parts via the hook methods.
         """
         logger.info("channel_uri: %s, rec_dir: %s", channel_uri, rec_dir)
-        self.is_running = True
 
         segment_index = 0
         section_index = -1
@@ -104,22 +136,22 @@ class HLS_Recorder_Base:
         segment_processor = None
 
         try:
-            logger.info("DEBUG: Entering main recording loop, stop_event.is_set()=%s", self.stop_event.is_set())
+            logger.info("Entering main recording loop, stop_event.is_set()=%s", self.stop_event.is_set())
             while not self.stop_event.is_set():
                 if reload_master_playlist:
-                    logger.info("DEBUG: Initializing session and segment processor")
-                    self.session = get_session()
-                    # channel_uri is already the media playlist URL (resolved by hls_switch)
+                    logger.info("Initializing session and segment processor")
+                    # Use authenticated session from resolver (trusted architecture)
+                    # channel_uri is the resolved media playlist URL
                     media_playlist_url = channel_uri
 
                     # Create/recreate segment processor with the media playlist base URL
                     if segment_processor is None:
-                        logger.info("DEBUG: Creating HLSSegmentProcessor")
-                        segment_processor = HLSSegmentProcessor(rec_dir, self.socketserver, media_playlist_url)
+                        logger.info("Creating HLSSegmentProcessor")
+                        segment_processor = HLSSegmentProcessor(rec_dir, self.socketserver, media_playlist_url, "hls_basic")
                     reload_master_playlist = False
                     write_log(rec_dir, "none", section_index, segment_index, msg="media-playlist-ready")
 
-                logger.info("DEBUG: Fetching playlist from: %s", media_playlist_url)
+                logger.info("Fetching playlist from: %s", media_playlist_url)
 
                 playlist_text = get_playlist(self.session, media_playlist_url)
                 if not playlist_text:
@@ -133,17 +165,29 @@ class HLS_Recorder_Base:
                     time.sleep(1)
                     continue
 
-                logger.info("DEBUG: Successfully fetched playlist, %d bytes", len(playlist_text))
+                logger.info("Successfully fetched playlist, %d bytes", len(playlist_text))
                 failed_playlist_count = 0
 
                 playlist = self.process_playlist_content(playlist_text)
+
+                # Check if this is a master playlist (has stream variants)
+                if hasattr(playlist, 'playlists') and playlist.playlists:
+                    logger.info("Detected master playlist, selecting best quality stream...")
+                    selected_media_url = self.handle_master_playlist(playlist, media_playlist_url)
+                    if selected_media_url:
+                        media_playlist_url = selected_media_url
+                        logger.info("Switched to media playlist: %s", media_playlist_url)
+                        continue  # Fetch the actual media playlist
+                    logger.error("Failed to select stream from master playlist")
+                    reload_master_playlist = True
+                    continue
 
                 if self.should_reload_master_playlist(playlist):
                     reload_master_playlist = True
                     time.sleep(1)
                     continue
 
-                target_duration = getattr(playlist, 'target_duration', 6)
+                target_duration = getattr(playlist, 'target_duration', 6) or 6
 
                 if not playlist.segments:
                     empty_playlist_count += 1
@@ -201,44 +245,6 @@ class HLS_Recorder_Base:
                 self.socketserver.broadcast(["stop", {"reason": "error", "channel": self.channel_uri, "rec_dir": rec_dir}])
             traceback.print_exc()
         finally:
-            terminate_ffmpeg_process(segment_processor.ffmpeg_proc)
-            self.is_running = False
+            if segment_processor and hasattr(segment_processor, 'ffmpeg_proc'):
+                terminate_ffmpeg_process(segment_processor.ffmpeg_proc)
             logger.info("Recording stopped")
-
-    def start(self, channel_uri, rec_dir, show_ads, buffering, auth_tokens=None, original_page_url=None, all_sources=None):
-        """
-        Starts the recording process in a new thread.
-
-        Args:
-            channel_uri (str): HLS playlist URL
-            rec_dir (str): Output directory
-            show_ads (bool): Whether to show ads
-            buffering (int): Number of segments to buffer
-            auth_tokens (dict | None): Authentication tokens (headers, cookies) for protected streams
-            original_page_url (str | None): Original page URL for fallback/debugging
-            all_sources (list | None): All available sources for potential fallbacks
-        """
-        logger.info("#" * 70)
-        logger.info("Starting HLS recording for channel: %s", channel_uri)
-        logger.info("#" * 70)
-
-        # Store authentication tokens and metadata
-        self.auth_tokens = auth_tokens
-        self.original_page_url = original_page_url
-        self.all_sources = all_sources
-
-        self.stop()
-
-        self.prepare_recording(channel_uri, rec_dir, show_ads)
-
-        while self.is_running:
-            logger.info("Recording is still running. waiting...")
-            time.sleep(0.5)
-
-        self.stop_event.clear()
-        threading.Thread(target=self.record_stream, args=(channel_uri, rec_dir, buffering), daemon=True).start()
-
-    def stop(self):
-        """Signals the recording thread to stop."""
-        logger.info("Stopping recording...")
-        self.stop_event.set()

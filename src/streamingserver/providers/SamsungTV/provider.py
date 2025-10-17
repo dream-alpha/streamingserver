@@ -7,10 +7,10 @@ import json
 import gzip
 import tempfile
 from io import BytesIO
-from pathlib import Path
 import threading
 import datetime
-import requests
+from auth_utils import get_headers
+from session_utils import get_session
 from debug import get_logger
 
 logger = get_logger(__file__)
@@ -26,6 +26,11 @@ class Provider():
         self.cache_file = self.data_dir / "cache.json"
         self._update_thread = None
         self._stop_event = threading.Event()
+
+        # Create session for HTTP requests
+        self.session = get_session()
+        self.session.headers.update(get_headers("browser"))
+
         self.update_channel_data()
 
     def get_categories(self):
@@ -111,7 +116,7 @@ class Provider():
 
         url = 'https://i.mjh.nz/SamsungTVPlus/.channels.json.gz'
         # Prefer streaming so we can handle large responses safely
-        resp = requests.get(url, stream=True, timeout=TIMEOUT)
+        resp = self.session.get(url, stream=True, timeout=TIMEOUT)
         resp.raise_for_status()
 
         # We'll stream-decompress into a temporary file to avoid large memory usage
@@ -251,13 +256,3 @@ class Provider():
                 with open(self.data_dir / "categories.json", "w", encoding="utf-8") as f:
                     json.dump(categories_list, f)
         return categories_list, categories_dict
-
-
-def main():
-    data_dir = Path("/root/plugins/streamingserver/data")
-    samsung = Provider("SamsungTV", data_dir)
-    samsung.update_channel_data()  # Start background updates
-
-
-if __name__ == "__main__":
-    main()

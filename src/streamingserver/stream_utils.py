@@ -1,290 +1,24 @@
-from urllib.parse import urlparse
-import gzip
-import requests
+# Copyright (C) 2018-2025 by dream-alpha
+# License: GNU General Public License v3.0 (see LICENSE file for details)
+
+from quality_utils import (
+    get_quality_score, get_codec_score, extract_codec_from_url, AV1_ENABLED,
+    QUALITY_SELECTORS, QUALITY_ALIASES, filter_sources_by_codec
+)
 from debug import get_logger
 
 logger = get_logger(__file__)
 
 
-def detect_stream_type(url):
-    logger.info(f"Detecting stream type for URL: {url}")
-    try:
-        # --- 0. Check for known M4S providers by URL pattern ---
-        # Check for xHamster M4S streams (both hostname and IP-based URLs)
-        if (".mp4.m3u8" in url
-            and ("xhcdn.com" in url
-                 or any(ip in url for ip in ("89.222.125.203", "79.127.216."))
-                 or "/media=hls4/" in url)):
-            logger.info("DEBUG: Detected xHamster M4S HLS stream by URL pattern")
-            return "HLS_M4S"
-
-        # --- 1. Check extension first ---
-        path = urlparse(url).path.lower()
-        if path.endswith(".m3u8"):
-            # For M3U8 files, we need to check content to determine if it's M4S-based
-            logger.info("DEBUG: M3U8 URL detected, will check content for M4S...")
-            # Don't return here - continue to content inspection
-        elif path.endswith(".mpd"):
-            return "DASH"
-        if path.endswith(".mp4"):
-            return "MP4"
-        if path.endswith(".webm"):
-            return "WebM"
-        if path.endswith(".ts"):
-            return "TS segment"
-
-        # --- 2. If no extension, check Content-Type header ---
-        try:
-            # Add User-Agent for YouTube CDN URLs
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            resp = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
-            content_type = resp.headers.get("Content-Type", "").lower()
-            logger.info(f"URL: {url}")
-            logger.info(f"Content-Type: {content_type}")
-
-            if "application/vnd.apple.mpegurl" in content_type or "application/x-mpegurl" in content_type:
-                return "HLS"
-            if "application/dash+xml" in content_type:
-                return "DASH"
-            if "video/mp4" in content_type:
-                return "MP4"
-            if "video/webm" in content_type:
-                return "WebM"
-            if "video/mp2t" in content_type:
-                return "TS"
-        except requests.RequestException as e:
-            print(f"Content-Type check failed: {e}")
-            # Continue to byte inspection
-
-        # --- 3. As fallback, peek at first 1024 bytes ---
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Range': 'bytes=0-1023'  # Only get first 1024 bytes
-            }
-            sample = requests.get(url, stream=True, timeout=10, headers=headers)
-            data = sample.raw.read(1024)
-            logger.info(f"First 1024 bytes: {data[:64]}...")
-
-            # Check if data is gzipped and decompress if needed
-            if data.startswith(b'\x1f\x8b\x08'):  # gzip magic number
-                try:
-                    # Try to get more data for proper decompression
-                    headers_full = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept-Encoding': 'gzip, deflate'
-                    }
-                    full_response = requests.get(url, headers=headers_full, timeout=15)
-
-                    # Check if response was gzipped
-                    if full_response.headers.get('content-encoding') == 'gzip':
-                        # requests automatically decompresses gzipped responses
-                        data = full_response.content[:1024]
-                        logger.info(f"Successfully decompressed gzipped content: {data[:64]}...")
-                    else:
-                        # Manual decompression for partial data
-                        decompressed = gzip.decompress(data)
-                        data = decompressed
-                        logger.info(f"Manually decompressed gzipped data: {data[:64]}...")
-
-                except Exception as e:
-                    logger.warning(f"Failed to decompress gzipped data: {e}")
-                    # If it's HTML content that's gzipped, try to detect it anyway
-                    if b'<html' in data.lower() or b'<body' in data.lower() or b'<!doctype' in data.lower():
-                        logger.info("Detected HTML content in compressed data - likely a webpage, not a video stream")
-                        return "HTML webpage"
-                    # Continue with original data
-
-            # Check if this is HTML content (webpage instead of video stream)
-            data_lower = data.lower()
-            if (b'<html' in data_lower or b'<body' in data_lower
-                    or b'<!doctype' in data_lower or b'<head>' in data_lower):
-                logger.warning("Detected HTML content - URL points to webpage, not video stream")
-                return "HTML webpage"
-
-            if data.startswith(b"#EXTM3U"):
-                # Check if it's M4S-based HLS (fragmented MP4)
-                logger.info("DEBUG: HLS playlist detected, checking for M4S content...")
-                logger.info("DEBUG: Playlist sample (first 500 bytes): %s", data[:500])
-                if b".m4s" in data.lower() or b"/m4s" in data.lower():
-                    logger.info("DEBUG: M4S content found - returning HLS_M4S")
-                    return "HLS_M4S"
-                logger.info("DEBUG: No M4S content found - returning HLS")
-                return "HLS"
-            if data.startswith(b"\x00\x00\x00") and b"ftyp" in data[:32]:
-                return "MP4"
-            if b"ftypmp4" in data[:32] or b"ftypisom" in data[:32]:
-                return "MP4"
-            if data.startswith(b"ID3") or data[0:1] == b"G":
-                return "TS"
-            if data.lstrip().startswith(b"<MPD"):
-                return "DASH"
-            if b"webm" in data[:100].lower():
-                return "WebM"
-        except requests.RequestException as e:
-            print(f"Byte inspection failed: {e}")
-
-        return "Unknown stream type"
-
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def resolve_url_with_quality_selection(sources, preferred_quality="best"):
+def select_best_source(sources, preferred_quality="best", codec_aware=True, av1=None):
     """
-    Central quality selection function for providers.
+    Select the best source from a list of sources with quality and codec information.
 
     Args:
-        sources (list): List of source dictionaries with 'quality', 'url', etc. keys
+        sources (list): List of source dictionaries with 'quality', 'url', 'codec' keys
         preferred_quality (str): Preferred quality ("best" for highest, or specific like "720p")
-
-    Returns:
-        str or None: Selected URL string or None if no sources available
-    """
-    if not sources:
-        logger.warning("No sources provided for quality selection")
-        return None
-
-    # If only one source, return its URL
-    if len(sources) == 1:
-        url = sources[0].get("url", "")
-        if url:
-            logger.info("Only one source available, selecting: %s", sources[0].get("quality", "unknown"))
-            return url
-        return None
-
-    # If requesting best quality (default), sources are already sorted by resolvers
-    # so just take the first one
-    if preferred_quality == "best":
-        best_source = sources[0]
-        url = best_source.get("url", "")
-        if url:
-            logger.info("Selected best quality source: %s", best_source.get("quality", "unknown"))
-            return url
-        return None
-
-    # Look for specific quality match
-    for source in sources:
-        source_quality = source.get("quality", "").lower()
-        if source_quality == preferred_quality.lower():
-            url = source.get("url", "")
-            if url:
-                logger.info("Found exact quality match: %s", source_quality)
-                return url
-
-    # If no exact match, find closest quality using scoring
-    target_score = get_quality_score(preferred_quality)
-    best_source = None
-    best_diff = float('inf')
-
-    for source in sources:
-        source_quality = source.get("quality", "")
-        source_score = get_quality_score(source_quality)
-        diff = abs(source_score - target_score)
-
-        if diff < best_diff:
-            best_diff = diff
-            best_source = source
-
-    if best_source:
-        url = best_source.get("url", "")
-        if url:
-            logger.info("Selected closest quality match: %s (target: %s)",
-                        best_source.get("quality", "unknown"), preferred_quality)
-            return url
-
-    # Final fallback - return first source URL
-    fallback_source = sources[0]
-    url = fallback_source.get("url", "")
-    if url:
-        logger.info("Using fallback source: %s", fallback_source.get("quality", "unknown"))
-        return url
-
-    return None
-
-
-def get_quality_score(quality: str) -> int:
-    """Convert quality string to numeric score for comparison"""
-    quality_lower = quality.lower()
-    if "4k" in quality_lower or "2160" in quality_lower:
-        return 4000
-    if "1440" in quality_lower:
-        return 1440
-    if "1080" in quality_lower:
-        return 1080
-    if "720" in quality_lower:
-        return 720
-    if "480" in quality_lower:
-        return 480
-    if "360" in quality_lower:
-        return 360
-    if "240" in quality_lower:
-        return 240
-    if "144" in quality_lower:
-        return 144
-    return 500  # Default score for unknown quality
-
-
-def select_best_hls_template_quality(available_qualities, preferred_quality="720p"):
-    """
-    Select the best available quality for HLS template streams.
-
-    Args:
-        available_qualities (list): List of available quality strings (e.g., ["1080p", "720p", "480p"])
-        preferred_quality (str): Preferred quality to select if available
-
-    Returns:
-        str or None: Selected quality string or None if no qualities available
-    """
-    if not available_qualities:
-        logger.warning("No available qualities provided, using fallback: %s", preferred_quality)
-        return preferred_quality
-
-    # Priority order: 1080p, 720p, 480p, 360p, 240p, 144p
-    quality_preference = ["1080p", "720p", "480p", "360p", "240p", "144p"]
-
-    # First try to find preferred quality
-    if preferred_quality in available_qualities:
-        logger.info("Selected preferred quality: %s", preferred_quality)
-        return preferred_quality
-
-    # Then try quality preference order
-    for pref_qual in quality_preference:
-        if pref_qual in available_qualities:
-            logger.info("Selected quality from preference order: %s", pref_qual)
-            return pref_qual
-
-    # If no preferred quality found, use the highest available by numeric value
-    numeric_qualities = []
-    for q in available_qualities:
-        try:
-            # Extract numeric value (e.g., "720p" -> 720)
-            numeric_value = int(q.replace('p', ''))
-            numeric_qualities.append((numeric_value, q))
-        except ValueError:
-            continue
-
-    if numeric_qualities:
-        numeric_qualities.sort(reverse=True)  # Highest first
-        selected_quality = numeric_qualities[0][1]
-        logger.info("Selected highest numeric quality: %s", selected_quality)
-        return selected_quality
-
-    # Fallback to first available
-    selected_quality = available_qualities[0]
-    logger.info("Selected fallback quality (first available): %s", selected_quality)
-    return selected_quality
-
-
-def select_best_source(sources, preferred_quality="best"):
-    """
-    Select the best source from a list of sources with quality information.
-
-    Args:
-        sources (list): List of source dictionaries with 'quality', 'url', etc. keys
-        preferred_quality (str): Preferred quality ("best" for highest, or specific like "720p")
+        codec_aware (bool): Whether to consider codec preferences in selection
+        av1 (bool): Whether to include AV1 codecs (None=use global setting, True=force enable, False=force disable)
 
     Returns:
         dict or None: Selected source dictionary or None if no sources available
@@ -293,10 +27,66 @@ def select_best_source(sources, preferred_quality="best"):
         logger.warning("No sources provided for selection")
         return None
 
+    # Log all available sources for debugging
+    logger.debug("=== Available Sources for Selection ===")
+    for i, source in enumerate(sources, 1):
+        codec = source.get("codec", extract_codec_from_url(source.get("url", "")))
+        quality = source.get("quality", "unknown")
+        format_type = source.get("format", "unknown")
+        url_preview = source.get("url", "")[:60] + "..." if len(source.get("url", "")) > 60 else source.get("url", "")
+        logger.debug("Source %d: %s (%s/%s) - %s", i, quality, codec, format_type, url_preview)
+    logger.debug("Requested quality: %s, codec_aware: %s, av1: %s", preferred_quality, codec_aware, av1)
+
     # If only one source, return it
     if len(sources) == 1:
-        logger.info("Only one source available, selecting: %s", sources[0].get("quality", "unknown"))
-        return sources[0]
+        selected = sources[0]
+        logger.info("Only one source available, selecting: %s (%s)",
+                    selected.get("quality", "unknown"),
+                    selected.get("codec", extract_codec_from_url(selected.get("url", ""))))
+        return selected
+
+    # Determine AV1 preference: parameter overrides global setting
+    av1_enabled = av1 if av1 is not None else AV1_ENABLED
+
+    # Filter out AV1 sources if AV1 is explicitly disabled
+    if av1 is False:  # Only when explicitly set to False (not None)
+        # Get all non-AV1 codecs from available sources
+        non_av1_codecs = []
+        for source in sources:
+            codec = source.get("codec", extract_codec_from_url(source.get("url", "")))
+            if codec.lower() != "av1" and codec.lower() not in non_av1_codecs:
+                non_av1_codecs.append(codec.lower())
+
+        if non_av1_codecs:
+            filtered_sources = filter_sources_by_codec(sources, non_av1_codecs)
+            if filtered_sources:  # Only use filtered sources if any remain
+                sources = filtered_sources
+                logger.info("Filtered out AV1 sources, %d sources remaining", len(sources))
+
+    # If requesting best quality and codec-aware, use combined scoring
+    if preferred_quality == "best" and codec_aware:
+        def combined_score(source):
+            quality = source.get("quality", "Unknown")
+            codec = source.get("codec", extract_codec_from_url(source.get("url", "")))
+
+            quality_score = get_quality_score(quality) * 100  # Weight quality higher
+            codec_score = get_codec_score(codec) if av1_enabled or codec != "av1" else 0
+
+            return quality_score + codec_score
+
+        # Debug: show scoring for each source
+        logger.debug("=== Combined Quality+Codec Scoring ===")
+        for source in sources:
+            score = combined_score(source)
+            quality = source.get("quality", "Unknown")
+            codec = source.get("codec", extract_codec_from_url(source.get("url", "")))
+            logger.debug("%s (%s): score = %d", quality, codec, score)
+
+        best_source = max(sources, key=combined_score)
+        logger.info("Selected best quality+codec source: %s (%s)",
+                    best_source.get("quality", "unknown"),
+                    best_source.get("codec", extract_codec_from_url(best_source.get("url", ""))))
+        return best_source
 
     # If requesting best quality (default), sources are already sorted by resolvers
     # so just take the first one
@@ -305,33 +95,86 @@ def select_best_source(sources, preferred_quality="best"):
         logger.info("Selected best quality source: %s", best_source.get("quality", "unknown"))
         return best_source
 
-    # Look for specific quality match
+    # Resolve quality selectors and aliases first
+
+    # Resolve selector to target quality (e.g., "fhd" → "1080p", "max" → "2160p")
+    resolved_quality = preferred_quality
+    if preferred_quality.lower() in QUALITY_SELECTORS:
+        resolved_quality = QUALITY_SELECTORS[preferred_quality.lower()]
+        logger.debug("Resolved quality selector '%s' → '%s'", preferred_quality, resolved_quality)
+
+    # Also check aliases (e.g., "FHD" → "1080p")
+    resolved_quality = QUALITY_ALIASES.get(resolved_quality, resolved_quality)
+
+    # Look for specific quality match using resolved quality
+    matching_sources = []
     for source in sources:
         source_quality = source.get("quality", "").lower()
-        if source_quality == preferred_quality.lower():
-            logger.info("Found exact quality match: %s", source_quality)
-            return source
+        if source_quality == resolved_quality.lower():
+            matching_sources.append(source)
+
+    if matching_sources:
+        if len(matching_sources) == 1:
+            selected = matching_sources[0]
+            logger.info("Found exact quality match: %s", selected.get("quality", "unknown"))
+            return selected
+        if codec_aware:
+            # Multiple sources with same quality - prefer better codec
+            def codec_score_func(source):
+                codec = source.get("codec", extract_codec_from_url(source.get("url", "")))
+                return get_codec_score(codec) if av1_enabled or codec != "av1" else 0
+
+            selected = max(matching_sources, key=codec_score_func)
+            logger.info("Found exact quality match with preferred codec: %s (%s)",
+                        selected.get("quality", "unknown"),
+                        selected.get("codec", extract_codec_from_url(selected.get("url", ""))))
+            return selected
+        # Return first match
+        selected = matching_sources[0]
+        logger.info("Found exact quality match: %s", selected.get("quality", "unknown"))
+        return selected
 
     # If no exact match, find closest quality using scoring
-    target_score = get_quality_score(preferred_quality)
+    target_score = get_quality_score(resolved_quality)
     best_source = None
     best_diff = float('inf')
+
+    logger.debug("=== Closest Quality Match Scoring ===")
+    logger.debug("Target quality: %s (resolved from: %s), target score: %d", resolved_quality, preferred_quality, target_score)
 
     for source in sources:
         source_quality = source.get("quality", "")
         source_score = get_quality_score(source_quality)
         diff = abs(source_score - target_score)
+        codec = source.get("codec", extract_codec_from_url(source.get("url", "")))
+        logger.debug("%s (%s): score = %d, diff = %d", source_quality, codec, source_score, diff)
 
-        if diff < best_diff:
-            best_diff = diff
-            best_source = source
+        if diff < best_diff or (diff == best_diff and codec_aware):
+            if diff == best_diff and codec_aware and best_source:
+                # Same quality difference - prefer better codec
+                current_codec = source.get("codec", extract_codec_from_url(source.get("url", "")))
+                best_codec = best_source.get("codec", extract_codec_from_url(best_source.get("url", "")))
+
+                current_codec_score = get_codec_score(current_codec) if av1_enabled or current_codec != "av1" else 0
+                best_codec_score = get_codec_score(best_codec) if av1_enabled or best_codec != "av1" else 0
+
+                if current_codec_score > best_codec_score:
+                    best_diff = diff
+                    best_source = source
+            else:
+                best_diff = diff
+                best_source = source
 
     if best_source:
-        logger.info("Selected closest quality match: %s (target: %s)",
-                    best_source.get("quality", "unknown"), preferred_quality)
+        logger.info("Selected closest quality match: %s (%s) (target: %s)",
+                    best_source.get("quality", "unknown"),
+                    best_source.get("codec", extract_codec_from_url(best_source.get("url", ""))),
+                    preferred_quality)
         return best_source
 
     # Final fallback - return first source
     fallback_source = sources[0]
-    logger.info("Using fallback source: %s", fallback_source.get("quality", "unknown"))
+    logger.info("Using fallback source: %s (%s)",
+                fallback_source.get("quality", "unknown"),
+                fallback_source.get("codec", extract_codec_from_url(fallback_source.get("url", ""))))
     return fallback_source

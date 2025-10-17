@@ -2,19 +2,18 @@
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
 import requests
+from auth_utils import get_headers
 
 
 def get_session():
-    session = requests.Session()
+    """
+    Get a session for HTTP requests.
 
-    # Set default headers for requests
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://pluto.tv/',
-        'Origin': 'https://pluto.tv',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-    })
+    Returns:
+        requests.Session: Session object with fully loaded browser-like headers set.
+    """
+
+    # Create a new session with full browser headers for better compatibility with streaming sites
+    session = requests.Session()
+    session.headers.update(get_headers("browser"))
     return session

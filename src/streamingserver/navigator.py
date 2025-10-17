@@ -2,8 +2,6 @@
 # Copyright (C) 2018-2025 by dream-alpha
 # License: GNU General Public License v3.0 (see LICENSE file for details)
 
-# pylint: disable=bad-builtin
-
 """
 Navigator - Socket Client for Testing Provider Commands
 
@@ -16,11 +14,14 @@ the socket server's provider functionality. It allows users to:
 """
 
 import json
+import queue
 import socket
 import sys
 import argparse
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 
@@ -57,6 +58,9 @@ class Navigator:
                     print(f"Received non-JSON response: {response[:100]}...")
 
             print(f"Connected to server at {self.host}:{self.port}")
+
+            # Small delay to ensure connection is fully established
+            time.sleep(0.1)
             return True
         except Exception as e:
             print(f"Failed to connect: {e}")
@@ -73,40 +77,134 @@ class Navigator:
 
             # For commands that expect a response
             if command in {"get_providers", "get_categories", "get_media_items"}:
-                response = self._receive_full_message()
-                if response:
-                    return json.loads(response)
+                return self._receive_response(command)
             return None
         except Exception as e:
             print(f"Error sending command: {e}")
             return None
 
-    def _receive_full_message(self):
-        """Receive a complete message, handling large responses."""
+    def _handle_async_message(self, message):
+        """Handle unsolicited messages from the server."""
+        print(f"🔍 Debug: _handle_async_message called with: {message}")  # Debug info
+
+        if isinstance(message, list) and len(message) >= 2:
+            msg_type = message[0]
+            msg_data = message[1] if len(message) > 1 else {}
+
+            print(f"🔍 Debug: Processing message type: {msg_type}")  # Debug info
+
+            if msg_type == "start":
+                print("\n🎉 📡 Server: Recording started!")
+                print("🎬 Playback can now begin!")
+                if isinstance(msg_data, dict):
+                    if "url" in msg_data:
+                        url_display = msg_data['url'][:60] + "..." if len(msg_data['url']) > 60 else msg_data['url']
+                        print(f"   📹 Stream: {url_display}")
+                    if "rec_file" in msg_data:
+                        print(f"   💾 Output: {msg_data['rec_file']}")
+                    if "section_index" in msg_data and "segment_index" in msg_data:
+                        print(f"   📊 Position: Section {msg_data['section_index']}, Segment {msg_data['segment_index']}")
+            elif msg_type == "stop":
+                print("\n⏹️ 📡 Server: Recording stopped!")
+                if isinstance(msg_data, dict) and "reason" in msg_data:
+                    reason_emoji = "✅" if msg_data['reason'] == "complete" else "❌" if msg_data['reason'] == "error" else "ℹ️"
+                    print(f"   {reason_emoji} Reason: {msg_data['reason']}")
+            else:
+                print(f"\n📡 Server notification: {msg_type}")
+        else:
+            print(f"🔍 Debug: Invalid message format: {message}")
+
+    def _receive_response(self, command):
+        """Receive and parse a response from the server with improved error handling."""
         try:
-            # Read data until we get a complete JSON message
-            buffer = b''
+            response_data = b''
+            self.socket.settimeout(60)  # Much longer timeout for large responses
+
+            # Read until we get a complete response
             while True:
-                chunk = self.socket.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-
-                # Try to decode and parse the current buffer
                 try:
-                    message = buffer.decode('utf-8').strip()
-                    if message:
-                        # Try to parse as JSON to see if it's complete
-                        json.loads(message)
-                        return message
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    # Not complete yet, continue reading
-                    continue
+                    chunk = self.socket.recv(8192)  # Larger chunk size
+                    if not chunk:
+                        break
 
-            # If we get here, return what we have
-            return buffer.decode('utf-8', errors='ignore').strip()
+                    response_data += chunk
+
+                    # Check if we have a complete response (ends with newline)
+                    if b'\n' in response_data:
+                        # Find all complete lines
+                        parts = response_data.split(b'\n')
+
+                        # Process each complete line
+                        for line in parts[:-1]:  # Exclude the last part which might be incomplete
+                            if not line.strip():
+                                continue
+
+                            try:
+                                decoded = line.decode('utf-8').strip()
+                                if decoded:
+                                    response = json.loads(decoded)
+                                    self.socket.settimeout(None)
+
+                                    # Check for error responses
+                                    if (isinstance(response, list) and len(response) >= 2
+                                            and response[0] == "error"):
+                                        print(f"Server error: {response[1].get('message', 'Unknown error')}")
+                                        return None
+
+                                    # Handle async messages (start, stop notifications)
+                                    if (isinstance(response, list) and len(response) >= 1
+                                            and response[0] in {"start", "stop"}
+                                            and response[0] != command):
+                                        self._handle_async_message(response)
+                                        continue  # Keep looking for the expected response
+
+                                    # Check if this is the expected response type
+                                    if (isinstance(response, list) and len(response) >= 1
+                                            and response[0] == command):
+                                        return response
+
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                # Skip malformed responses and continue
+                                continue
+
+                        # Keep any incomplete data for the next iteration
+                        response_data = parts[-1]
+
+                    # Increase buffer limit for large responses like PlutoTV (301KB)
+                    if len(response_data) > 5 * 1024 * 1024:  # 5MB limit instead of 1MB
+                        print(f"Response buffer too large ({len(response_data)} bytes), clearing")
+                        response_data = b''
+
+                except socket.timeout:
+                    print(f"Timeout waiting for {command} response (buffer size: {len(response_data)} bytes)")
+                    break
+                except Exception as e:
+                    print(f"Error receiving data for {command}: {e}")
+                    break
+
+            self.socket.settimeout(None)
+
+            # Final attempt to parse any remaining data
+            if response_data:
+                try:
+                    decoded = response_data.decode('utf-8', errors='ignore').strip()
+                    if decoded:
+                        response = json.loads(decoded)
+
+                        # Check if this is the expected response
+                        if (isinstance(response, list) and len(response) >= 1
+                                and response[0] == command):
+                            return response
+
+                except Exception:
+                    pass
+
+            print(f"Failed to receive valid response for {command}")
+            return None
+
         except Exception as e:
-            print(f"Error receiving message: {e}")
+            print(f"Error in receive_response for {command}: {e}")
+            self.socket.settimeout(None)
             return None
 
     def get_providers(self):
@@ -115,13 +213,21 @@ class Navigator:
         print("GETTING PROVIDERS")
         print("=" * 50)
 
-        response = self.send_command("get_providers")
-        if response and response[0] == "get_providers":
-            self.providers = response[1]["data"]
-            print(f"Found {len(self.providers)} providers:")
-            for i, provider in enumerate(self.providers):
-                print(f"{i + 1:2d}. {provider.get('name', 'Unknown')} (ID: {provider.get('provider_id', 'N/A')})")
-            return True
+        max_retries = 2
+        for attempt in range(max_retries):
+            response = self.send_command("get_providers")
+
+            if response and isinstance(response, list) and len(response) >= 2 and response[0] == "get_providers":
+                self.providers = response[1]["data"]
+                print(f"Found {len(self.providers)} providers:")
+                for i, provider in enumerate(self.providers):
+                    print(f"{i + 1:2d}. {provider.get('name', 'Unknown')} (ID: {provider.get('provider_id', 'N/A')})")
+                return True
+
+            if attempt < max_retries - 1:
+                print("Retrying...")
+                time.sleep(0.3)  # Brief delay before retry
+
         print("Failed to get providers")
         return False
 
@@ -133,7 +239,7 @@ class Navigator:
 
         while True:
             try:
-                choice = input(f"\nSelect provider (1-{len(self.providers)}) or 'q' to quit: ").strip()
+                choice = input(f"\nSelect provider (1-{len(self.providers)}) or 'q' to quit: ").strip()  # pylint: disable=bad-builtin
                 if choice.lower() == 'q':
                     return False
 
@@ -161,17 +267,24 @@ class Navigator:
             "data_dir": "/home/alpha/streamingserver"
         }
 
-        response = self.send_command("get_categories", args)
-        if response and response[0] == "get_categories":
-            self.categories = response[1]["data"]
-            print(f"Found {len(self.categories)} categories:")
-            for i, category in enumerate(self.categories):
-                # Categories might be strings or objects
-                if isinstance(category, str):
-                    print(f"{i + 1:2d}. {category}")
-                else:
-                    print(f"{i + 1:2d}. {category.get('name', category)}")
-            return True
+        max_retries = 2
+        for attempt in range(max_retries):
+            response = self.send_command("get_categories", args)
+            if response and response[0] == "get_categories":
+                self.categories = response[1]["data"]
+                print(f"Found {len(self.categories)} categories:")
+                for i, category in enumerate(self.categories):
+                    # Categories might be strings or objects
+                    if isinstance(category, str):
+                        print(f"{i + 1:2d}. {category}")
+                    else:
+                        print(f"{i + 1:2d}. {category.get('name', category)}")
+                return True
+
+            if attempt < max_retries - 1:
+                print("Retrying...")
+                time.sleep(0.3)
+
         print("Failed to get categories")
         return False
 
@@ -183,7 +296,7 @@ class Navigator:
 
         while True:
             try:
-                choice = input(f"\nSelect category (1-{len(self.categories)}) or 'q' to quit: ").strip()
+                choice = input(f"\nSelect category (1-{len(self.categories)}) or 'q' to quit: ").strip()  # pylint: disable=bad-builtin
                 if choice.lower() == 'q':
                     return False
 
@@ -216,22 +329,29 @@ class Navigator:
             "data_dir": str(Path.cwd())
         }
 
-        response = self.send_command("get_media_items", args)
-        if response and response[0] == "get_media_items":
-            self.media_items = response[1]["data"]
-            print(f"Found {len(self.media_items)} media items:")
-            for i, item in enumerate(self.media_items[:20]):  # Show max 20 items
-                if isinstance(item, dict):
-                    title = item.get('title', item.get('name', 'Unknown'))
-                    url = item.get('url', 'N/A')
-                    print(f"{i + 1:2d}. {title}")
-                    print(f"     URL: {url}")
-                else:
-                    print(f"{i + 1:2d}. {item}")
+        max_retries = 2
+        for attempt in range(max_retries):
+            response = self.send_command("get_media_items", args)
+            if response and response[0] == "get_media_items":
+                self.media_items = response[1]["data"]
+                print(f"Found {len(self.media_items)} media items:")
+                for i, item in enumerate(self.media_items[:20]):  # Show max 20 items
+                    if isinstance(item, dict):
+                        title = item.get('title', item.get('name', 'Unknown'))
+                        url = item.get('url', 'N/A')
+                        print(f"{i + 1:2d}. {title}")
+                        print(f"     URL: {url}")
+                    else:
+                        print(f"{i + 1:2d}. {item}")
 
-            if len(self.media_items) > 20:
-                print(f"... and {len(self.media_items) - 20} more items")
-            return True
+                if len(self.media_items) > 20:
+                    print(f"... and {len(self.media_items) - 20} more items")
+                return True
+
+            if attempt < max_retries - 1:
+                print("Retrying...")
+                time.sleep(0.5)  # Shorter delay for media items
+
         print("Failed to get media items")
         return False
 
@@ -258,7 +378,7 @@ class Navigator:
 
         while True:
             try:
-                choice = input(f"\nSelect media item (1-{min(20, len(self.media_items))}) or 'q' to quit: ").strip()
+                choice = input(f"\nSelect media item (1-{min(20, len(self.media_items))}) or 'q' to quit: ").strip()  # pylint: disable=bad-builtin
                 if choice.lower() == 'q':
                     return False
 
@@ -351,7 +471,7 @@ class Navigator:
 
         while True:
             try:
-                choice = input(f"\nSelect media item (1-{min(20, len(self.media_items))}) or 'q' to quit: ").strip()
+                choice = input(f"\nSelect media item (1-{min(20, len(self.media_items))}) or 'q' to quit: ").strip()  # pylint: disable=bad-builtin
                 if choice.lower() == 'q':
                     return False
 
@@ -376,12 +496,12 @@ class Navigator:
         print(f"URL: {url}")
 
         # Get recording directory
-        rec_dir = input("Enter recording directory (default: /tmp): ").strip()
+        rec_dir = input("Enter recording directory (default: /tmp): ").strip()  # pylint: disable=bad-builtin
         if not rec_dir:
             rec_dir = "/tmp"
 
         # Get buffering setting
-        buffering_input = input("Enter buffering segments (default: 5): ").strip()
+        buffering_input = input("Enter buffering segments (default: 5): ").strip()  # pylint: disable=bad-builtin
         try:
             buffering = int(buffering_input) if buffering_input else 5
         except ValueError:
@@ -392,7 +512,9 @@ class Navigator:
             "url": url,
             "rec_dir": rec_dir,
             "show_ads": False,
-            "buffering": buffering
+            "buffering": buffering,
+            "av1": True,
+            "quality": "best"
         }
 
         # Add provider information if we have a selected provider
@@ -408,20 +530,93 @@ class Navigator:
         # Send start command (no response expected)
         self.send_command("start", args)
 
-        print("Recording started! Use menu option 9 to stop recording.")
-        print("Check server logs for recording status.")
+        print("📡 Start command sent to server...")
+        print("🎬 Recording should begin shortly - watch for server notifications!")
+        print("📋 Use menu option 10 to stop recording when done.")
+
+        # Check for immediate server response multiple times
+        print("🔍 Checking for server notifications...")
+        for i in range(5):  # Check 5 times over 2.5 seconds
+            time.sleep(0.5)
+            print(f"🔍 Check {i + 1} / 5...")
+            self.check_for_async_messages()
+
+        print("✅ Initial notification check complete.")
         return True
 
     def stop_recording(self):
         """Stop the current recording."""
-        print("\nSending stop command...")
-        self.send_command("stop")
-        print("Stop command sent! Check server logs for confirmation.")
+        print("\n⏹️  Sending stop command...")
+
+        # Send stop command without expecting a response (like start command)
+        try:
+            message = ["stop", {}]
+            self.socket.sendall((json.dumps(message) + '\n').encode())
+            print("📡 Stop command sent to server!")
+            print("🔍 Watch for server stop notifications...")
+
+            # Check for immediate async response
+            time.sleep(0.5)
+            self.check_for_async_messages()
+
+        except Exception as e:
+            print(f"❌ Error sending stop command: {e}")
+            return False
+
         return True
+
+    def check_for_async_messages(self):
+        """Check for any pending async messages from server without blocking."""
+        if not self.socket:
+            return
+
+        original_timeout = None
+        try:
+            # Set socket to non-blocking mode temporarily
+            original_timeout = self.socket.gettimeout()
+            self.socket.settimeout(0.01)  # Very short timeout for non-blocking check
+
+            messages_received = 0
+            while messages_received < 10:  # Limit to prevent infinite loop
+                try:
+                    data = self.socket.recv(4096)
+                    if not data:
+                        break
+
+                    # Process any complete messages
+                    for line in data.decode('utf-8', errors='ignore').split('\n'):
+                        line = line.strip()
+                        if line:
+                            try:
+                                message = json.loads(line)
+                                if isinstance(message, list) and len(message) >= 1:
+                                    if message[0] in {"start", "stop"}:
+                                        self._handle_async_message(message)
+                                        messages_received += 1
+                                        print(f"🔄 Processed async message: {message[0]}")  # Debug info
+                            except json.JSONDecodeError:
+                                continue
+
+                except socket.timeout:
+                    # No more messages available
+                    break
+                except Exception as e:
+                    print(f"🔍 Debug: Exception in async check: {e}")
+                    break
+
+        except Exception as e:
+            print(f"🔍 Debug: Error in check_for_async_messages: {e}")
+        finally:
+            # Restore original timeout
+            if original_timeout is not None:
+                self.socket.settimeout(original_timeout)
 
     def main_menu(self):
         """Display the main menu and handle user choices."""
         while True:
+            # Check for any async messages before showing menu
+            self.check_for_async_messages()
+
             print("\n" + "=" * 50)
             print("NAVIGATOR - Provider Testing Menu")
             print("=" * 50)
@@ -437,7 +632,33 @@ class Navigator:
             print("10. Stop Recording")
             print("q. Quit")
 
-            choice = input("\nEnter your choice: ").strip().lower()
+            print("\nEnter your choice: ", end='', flush=True)
+
+            # Check for async messages while waiting for input
+
+            input_queue = queue.Queue()
+
+            def get_input():
+                try:
+                    user_input = input()  # pylint: disable=bad-builtin
+                    input_queue.put(user_input)
+                except (EOFError, KeyboardInterrupt):
+                    input_queue.put("")
+
+            input_thread = threading.Thread(target=get_input, daemon=True)
+            input_thread.start()
+
+            # Wait for input while checking for async messages
+            choice = ""
+            while input_thread.is_alive():
+                try:
+                    choice = input_queue.get(timeout=0.2)
+                    break
+                except queue.Empty:
+                    self.check_for_async_messages()
+                    continue
+
+            choice = choice.strip().lower()
 
             if choice == '1':
                 self.get_providers()
