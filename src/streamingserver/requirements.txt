@@ -1,0 +1,6 @@
+m3u8
+requests
+pycryptodome
+beautifulsoup4
+cloudscraper
+brotli

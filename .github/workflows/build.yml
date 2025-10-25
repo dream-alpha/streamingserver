@@ -1,0 +1,93 @@
+name: Build StreamingServer Application
+
+on:
+  push:
+    tags:
+      - '*.*.*' # Triggers only on version tags like 1.0.0
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # Set up Python environment
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      # Install system-level dependencies
+      - name: Install System Dependencies
+        run: |
+          chmod +x scripts/install-deps.sh
+          ./scripts/install-deps.sh
+          sudo apt install -y upx
+
+      # Cache pip dependencies for faster builds
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Install Python dependencies
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      # Compile QML resources
+      # - name: Compile QML Resources
+      #  run: |
+      #    pyside6-rcc src/streamingserver/resources/resources.qrc -o src/streamingserver/resources/resources_rc.py
+
+      # Build the executable with PyInstaller
+      - name: Build Executable with PyInstaller
+        run: |
+          pyinstaller --clean -y streamingserver.spec --log-level=DEBUG
+
+      # Upload the executable as an artifact
+      - name: Upload Executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamingserver-executable
+          path: dist/streamingserver
+
+      # Create GitHub Release
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+
+      # zip Executable
+      - name: Archive Executable
+        run: |
+          tar -czvf streamingserver.tar.gz -C dist streamingserver
+
+      # Upload Executable to Release
+      - name: Upload Executable to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./streamingserver.tar.gz
+          asset_name: streamingserver.tar.gz
+          asset_content_type: application/gzip

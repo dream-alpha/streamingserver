@@ -1,0 +1,120 @@
+#!/bin/sh
+set -e
+model=$(cat /proc/stb/info/model)
+echo model: $model
+if [ $model = "one" ] || [ $model = "two" ]; then
+	arch="arm64"
+else
+	arch="armhf"
+fi
+
+CHROOT_DIR=/data/ubuntu
+ENIGMA2_DIR=/usr/lib/enigma2/python/Plugins/SystemPlugins/streamingserver
+UBUNTU_DIR=$CHROOT_DIR/root/plugins/streamingserver
+mkdir -p $UBUNTU_DIR
+
+cp $ENIGMA2_DIR/Version.py $ENIGMA2_DIR/src/version.py
+cp -avr $ENIGMA2_DIR/src/* $UBUNTU_DIR/
+
+# mkdir -p /usr/lib/enigma2/python/Plugins/SystemPlugins/streamingserver
+# cp $ENIGMA2_DIR/*.py /usr/lib/enigma2/python/Plugins/SystemPlugins/streamingserver/.
+# rm $ENIGMA2_DIR/*.py
+
+# Ensure chroot directories exist and have proper permissions
+mkdir -p $CHROOT_DIR/var/lib/dpkg/info
+mkdir -p $CHROOT_DIR/var/log/journal
+mkdir -p $CHROOT_DIR/run/systemd
+mkdir -p $CHROOT_DIR/etc/systemd/system
+
+# Disable systemd and related packages maintainer scripts BEFORE chroot and package config
+# Create systemd dummy scripts to prevent configuration issues in chroot
+for script in postinst prerm postrm preinst; do
+    echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/systemd.$script
+    chmod +x $CHROOT_DIR/var/lib/dpkg/info/systemd.$script
+done
+
+# Also disable other systemd-related packages that might cause issues
+for pkg in systemd-dev systemd-timesyncd systemd-resolved systemd-networkd; do
+    for script in postinst prerm postrm preinst; do
+        if [ -f $CHROOT_DIR/var/lib/dpkg/info/$pkg.$script ]; then
+            echo -e '#!/bin/sh\nexit 0' > $CHROOT_DIR/var/lib/dpkg/info/$pkg.$script
+            chmod +x $CHROOT_DIR/var/lib/dpkg/info/$pkg.$script
+        fi
+    done
+done
+
+# Prevent passwd lock issues in chroot by ensuring proper file permissions
+chmod 644 $CHROOT_DIR/etc/passwd 2>/dev/null || true
+chmod 644 $CHROOT_DIR/etc/group 2>/dev/null || true
+chmod 640 $CHROOT_DIR/etc/shadow 2>/dev/null || true
+chmod 640 $CHROOT_DIR/etc/gshadow 2>/dev/null || true
+
+# Create systemd policy-rc.d to prevent service starts in chroot
+cat > $CHROOT_DIR/usr/sbin/policy-rc.d << 'EOF'
+#!/bin/sh
+exit 101
+EOF
+chmod +x $CHROOT_DIR/usr/sbin/policy-rc.d
+
+# Create minimal required users/groups for systemd in chroot
+chroot "$CHROOT_DIR" /bin/bash -c "
+    # Create systemd users if they don't exist
+    if ! getent passwd systemd-network >/dev/null 2>&1; then
+        useradd -r -s /usr/sbin/nologin -d /run/systemd systemd-network 2>/dev/null || true
+    fi
+    if ! getent group systemd-journal >/dev/null 2>&1; then
+        groupadd -r systemd-journal 2>/dev/null || true
+    fi
+    if ! getent group systemd-network >/dev/null 2>&1; then
+        groupadd -r systemd-network 2>/dev/null || true
+    fi
+" 2>/dev/null || echo "Note: User creation had some issues, continuing anyway..."
+
+# cd /data
+# url=https://github.com/dream-alpha/streamingserver/releases/download/7.0.2/ffmpeg-release-$arch-static.tar.xz
+# wget $url -O ffmpeg-7.0.2-$arch-static.tar.xz
+# tar -xvf ffmpeg-7.0.2-$arch-static.tar.xz
+
+# cp /data/ffmpeg-7.0.2-$arch-static/ffmpeg $CHROOT_DIR/usr/bin
+# cp /data/ffmpeg-7.0.2-$arch-static/ffprobe $CHROOT_DIR/usr/bin
+# rm -rf /data/ffmpeg-7.0.2-$arch-static
+
+$CHROOT_DIR/root/mount_chroot
+
+# Set environment variables to prevent systemd issues in chroot
+export DEBIAN_FRONTEND=noninteractive
+export DEBCONF_NONINTERACTIVE_SEEN=true
+
+chroot "$CHROOT_DIR" /bin/bash -c "
+    export DEBIAN_FRONTEND=noninteractive
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+    
+    # Fix any broken packages first
+    echo '[*] Fixing broken packages...'
+    dpkg --configure -a --force-depends || true
+    
+    # Skip systemd configuration if it's causing issues
+    echo '[*] Installing/updating ffmpeg...'
+    apt update || true
+    apt install -y --no-install-recommends ffmpeg || {
+        echo '[*] Direct ffmpeg install failed, trying with broken dependencies ignored...'
+        apt install -y --no-install-recommends --fix-broken ffmpeg || true
+    }
+    
+    echo '[*] Updating plugin packages...'
+    /root/venv/bin/pip install -r /root/plugins/streamingserver/requirements.txt
+    
+    echo '[*] Cleaning up package configuration...'
+    apt-get autoremove -y || true
+    apt-get clean || true
+"
+
+$CHROOT_DIR/root/umount_chroot
+echo "***********************************"
+echo "*         streamingserver         *"
+echo "*               by                *"
+echo "*          dream-alpha            *"
+echo "***********************************"
+echo ""
+echo "Plugin successfully installed."
+exit 0

@@ -1,0 +1,26 @@
+# Include essential documentation and license files
+include README.md
+include LICENSE
+
+# Include all Python files within the streamingserver package
+recursive-include src/streamingserver *.py
+
+# Include the compiled resource module
+# include src/streamingserver/resources/resources_rc.py
+
+# Include resource files
+# recursive-include src/streamingserver/resources/icons *.svg
+# recursive-include src/streamingserver/resources *.qrc
+
+# Include QML files and qmldir within MainMenu and Qml directories
+# recursive-include src/streamingserver/MainMenu *.qml qmldir
+# recursive-include src/streamingserver/Qml *.qml
+
+# Include translation files
+# recursive-include src/streamingserver/translations *.qm
+
+# (Optional) Include additional resources if any
+# recursive-include src/streamingserver/resources *.png *.jpg *.json *.yaml
+
+# (Optional) Exclude test files or other unwanted directories
+# exclude src/streamingserver/tests/*
