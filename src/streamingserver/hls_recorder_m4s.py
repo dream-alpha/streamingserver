@@ -41,8 +41,11 @@ class HLS_Recorder_M4S(BaseRecorder):
                                  original_url, etc.
         """
         super().record_start(resolve_result)
-        # Extract data from resolve_result
 
+        # Store resolve_result for access to configuration options
+        self.resolve_result = resolve_result
+
+        # Extract data from resolve_result
         channel_uri = resolve_result.get("resolved_url")
         ffmpeg_headers = resolve_result.get("ffmpeg_headers")
         rec_dir = resolve_result.get("rec_dir", "/tmp")
@@ -53,7 +56,7 @@ class HLS_Recorder_M4S(BaseRecorder):
 
         logger.info("Starting M4S HLS recording for: %s", channel_uri)
         logger.info("Extracted ffmpeg_headers: %s", type(ffmpeg_headers))
-        logger.info("Extracted ffmpeg_headers content: %s", str(ffmpeg_headers)[:200] + "..." if ffmpeg_headers and len(str(ffmpeg_headers)) > 200 else str(ffmpeg_headers))
+        logger.info("Extracted ffmpeg_headers content: %s", ffmpeg_headers)
 
         # Start recording - BaseRecorder handles the threading
         self.record_stream(channel_uri, rec_dir, ffmpeg_headers)
@@ -72,14 +75,11 @@ class HLS_Recorder_M4S(BaseRecorder):
         count_up = 0
 
         try:
-            # Always use TS output for universal transcoding and maximum Dreambox compatibility
             output_file = os.path.join(rec_dir, "stream_0.ts")
-            logger.info("Using TS output for universal transcoding (maximum Dreambox compatibility)")
 
             # FFmpeg will handle URL validation and authentication directly
 
             self.ffmpeg_process = self._start_ffmpeg(channel_uri, output_file, ffmpeg_headers)
-
             logger.info("M4S recording started - FFmpeg handling stream")
 
             # Wait for FFmpeg to complete or stop signal
@@ -104,6 +104,8 @@ class HLS_Recorder_M4S(BaseRecorder):
                                 logger.error("FFmpeg got 401 Unauthorized - credentials invalid")
                             elif "Invalid data" in stderr_text:
                                 logger.error("FFmpeg got invalid data - URL may not be a valid stream")
+                            elif "Protocol not found" in stderr_text or "protocol" in stderr_text.lower():
+                                logger.error("FFmpeg protocol error - check URL format and network connectivity")
                     except Exception as e:
                         logger.warning("Could not get FFmpeg stderr: %s", e)
                         raise
@@ -112,6 +114,15 @@ class HLS_Recorder_M4S(BaseRecorder):
                         logger.info("FFmpeg completed successfully")
                     else:
                         logger.error("FFmpeg exited with code: %d", return_code)
+
+                        # Specific diagnosis for common exit codes
+                        if return_code == 234:
+                            logger.error("Exit code 234: Invalid data or protocol error")
+                            logger.error("Possible causes: expired URL token, invalid M3U8 format, network issues")
+                        elif return_code == 1:
+                            logger.error("Exit code 1: General FFmpeg error - check stderr above")
+                        elif return_code in {403, 404}:
+                            logger.error("Exit code %d: HTTP error - authentication or URL issues", return_code)
 
                         if self.socketserver:
                             self.socketserver.broadcast([
@@ -124,8 +135,8 @@ class HLS_Recorder_M4S(BaseRecorder):
                             ])
                     break
 
-                if count_up == 10:
-                    self.start_playback(channel_uri, output_file)
+                if count_up == 5:
+                    self.start_playback(channel_uri, output_file, "hls_m4s")
                 count_up += 1
 
                 time.sleep(1)  # Check every second
@@ -150,66 +161,49 @@ class HLS_Recorder_M4S(BaseRecorder):
         Returns:
             subprocess.Popen: FFmpeg process object
         """
-        # Build FFmpeg command - always use MP4 output for better compatibility
+        # Build FFmpeg command
         cmd = [
             'ffmpeg',
             '-y',
+            '-reconnect', '1',       # Auto-reconnect on connection loss
+            '-reconnect_streamed', '1',  # Reconnect for streamed content
+            '-reconnect_delay_max', '30',  # Max reconnection delay
         ]
         if ffmpeg_headers:
             cmd += ['-headers', ffmpeg_headers]
 
         # Universal transcoding approach for maximum Dreambox compatibility
-        # All sources are transcoded to optimized H.264 with TS container for consistent results
         logger.info("Transcoding all sources to optimized H.264 for maximum Dreambox compatibility")
 
-        # Use .ts container for better Dreambox compatibility and avoid MP4 container issues
-        output_file_ts = output_file.replace('.mp4', '.ts')
+        # TS output format - better for older Dreambox hardware
         cmd += [
             '-i', input_url,
-            '-c:v', 'libx264',       # Transcode all sources to optimized H.264 for Dreambox compatibility
-            '-profile:v', 'baseline',  # Use Baseline profile for maximum compatibility with older hardware
-            '-level:v', '3.0',       # Level 3.0 (most conservative)
+            '-c:v', 'libx264',       # Transcode to H.264
+            '-profile:v', 'baseline',  # Baseline profile for maximum compatibility
+            '-level:v', '3.1',       # Level 3.1 for 720p HD support
             '-preset', 'ultrafast',  # Use ultrafast preset for real-time transcoding
-            '-b:v', '1200k',         # Better bitrate for 720p24 quality
-            '-maxrate', '1200k',     # Set max bitrate
-            '-bufsize', '2400k',     # Set buffer size (2x bitrate)
-            '-pix_fmt', 'yuv420p',   # Ensure compatible pixel format
-            '-vf', 'scale=1280:720:flags=fast_bilinear',  # Use fast scaling for speed
-            '-r', '24',              # Match source frame rate (720p24)
-            '-g', '48',              # GOP size 2 seconds (24fps * 2)
-            '-refs', '1',            # Limit reference frames for older decoder compatibility
-            '-tune', 'zerolatency',  # Optimize for low latency streaming
-            '-slices', '8',          # More slices for parallel processing
-            '-threads', '0',         # Use all available CPU cores (0 = auto)
-            '-x264opts', 'bframes=0:cabac=0:weightp=0:8x8dct=0:aud=1:me=dia:subme=1:trellis=0',  # Ultra-basic encoding options
-            '-c:a', 'aac',           # Transcode audio to AAC for Dreambox compatibility
-            '-bsf:a', 'aac_adtstoasc',  # Fix AAC bitstream format for container compatibility
-            '-b:a', '128k',          # Set audio bitrate to 128kbps
-            '-ar', '48000',          # Ensure 48kHz sample rate
-            '-ac', '2',              # Force stereo audio
-            '-f', 'mpegts',          # Use Transport Stream format (better for Dreambox)
-            '-mpegts_copyts', '1',   # Copy timestamps for better TS compatibility
+            '-tune', 'zerolatency',  # Optimize for low latency (auto-optimizes GOP size)
+            '-threads', '0',         # Use all available CPU cores
+            '-x264opts', 'bframes=0:cabac=0:weightp=0:8x8dct=0:aud=1:me=dia:subme=1:trellis=0:ref=1:slices=8',  # Consolidated encoding options
+            '-c:a', 'aac',           # AAC audio
+            '-bsf:a', 'aac_adtstoasc',  # Fix AAC bitstream format
+            '-f', 'mpegts',          # Transport Stream format
+            '-mpegts_copyts', '1',   # Copy timestamps
             '-mpegts_start_pid', '0x100',  # Set consistent PID numbering
-            '-mpegts_m2ts_mode', '0',  # Disable M2TS mode for better compatibility
-            '-mpegts_pmt_start_pid', '0x1000',  # Set PMT PID for better compatibility
-            '-mpegts_original_network_id', '1',  # Set network ID for proper TS structure
+            '-mpegts_m2ts_mode', '0',  # Disable M2TS mode
+            '-mpegts_original_network_id', '1',  # Set network ID
             '-mpegts_service_id', '1',  # Set service ID
-            '-muxrate', '2000000',   # Set constant mux rate (2 Mbps) for steady stream
-            '-flush_packets', '1',   # Flush packets immediately for better streaming
-            '-fflags', '+genpts+igndts',  # Generate PTS, ignore DTS discontinuities, low delay mode
-            '-max_muxing_queue_size', '1024',  # Smaller queue for lower latency
-            '-max_delay', '0',       # Minimize encoding delay
+            '-fflags', '+genpts+igndts+flush_packets+discardcorrupt',  # Generate PTS, ignore discontinuities, discard corrupt packets
+            '-max_muxing_queue_size', '512',  # Even smaller queue for lower latency
             '-avoid_negative_ts', 'make_zero',  # Ensure positive timestamps
-            '-vsync', 'cfr',          # Constant frame rate to avoid timing gaps
-            '-shortest',              # End when shortest stream ends (prevents hanging)
-            '-copyts',                # Copy input timestamps (better sync)
-            '-probesize', '256M',     # Increase probe size for better initial analysis
-            '-analyzeduration', '40M',  # Analyze more data upfront for smoother start
+            '-err_detect', 'ignore_err',  # Ignore minor stream errors
+            '-vsync', 'cfr',         # Constant frame rate
+            '-shortest',             # End when shortest stream ends
+            '-probesize', '128M',    # Increase probe size
+            '-analyzeduration', '20M',  # Analyze more data upfront
             '-loglevel', 'error',
-            # No time limit - record the entire video
-            output_file_ts
+            output_file
         ]
-        logger.info("Using updated FFmpeg command with all headers")
 
         # Log the complete command for debugging (but mask sensitive data)
         cmd_str_safe = []
@@ -226,7 +220,7 @@ class HLS_Recorder_M4S(BaseRecorder):
                 cmd_str_safe.append(f'"{arg}"' if ' ' in arg else arg)
 
         logger.info("Full FFmpeg command (headers masked): %s", ' '.join(cmd_str_safe))
-        logger.info("Headers being passed to FFmpeg: %s", ffmpeg_headers[:200] + "..." if ffmpeg_headers and len(ffmpeg_headers) > 200 else ffmpeg_headers)
+        logger.info("Headers being passed to FFmpeg: %s", ffmpeg_headers)
 
         try:
             version_result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5, check=False)

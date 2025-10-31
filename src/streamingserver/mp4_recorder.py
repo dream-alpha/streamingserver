@@ -109,9 +109,9 @@ class MP4_Recorder(BaseRecorder):
                 if response.status_code == 403:
                     logger.error("HTTP 403 Forbidden error when accessing video URL")
                     logger.error("This usually indicates missing or incorrect headers (especially Referer)")
-                    logger.error("URL: %s", url[:100] + "..." if len(url) > 100 else url)
+                    logger.error("URL: %s", url)
                     logger.error("Session headers: %s", dict(session.headers))
-                    raise PermissionError(f"403 Forbidden - CDN access denied. URL: {url[:80]}...")
+                    raise PermissionError(f"403 Forbidden - CDN access denied. URL: {url}...")
                 response.raise_for_status()
 
                 # Initialize variables for progress tracking
@@ -137,9 +137,9 @@ class MP4_Recorder(BaseRecorder):
                             # Log first chunk to confirm download started
                             if chunk_count == 1:
                                 logger.info("First chunk received and written (%d bytes)", len(chunk))
-                            elif chunk_count == 250 and not self.recording_has_started:
+                            elif chunk_count == 400 and not self.recording_has_started:
                                 self.recording_has_started = True
-                                self.start_playback(url, output_file)
+                                self.start_playback(url, output_file, "mp4")
 
                             # Update progress and report at reasonable intervals (every ~2%)
                             if self.total_size > 0:
@@ -180,12 +180,12 @@ class MP4_Recorder(BaseRecorder):
                             format_size(self.total_size) if self.total_size > 0 else format_size(final_size))
                 if not self.recording_has_started:
                     self.recording_has_started = True
-                    self.start_playback(url, output_file)
+                    self.start_playback(url, output_file, "mp4")
                 logger.info("MP4 download completed successfully")
             else:
                 logger.error("Downloaded file is empty or missing")
-                super().on_error("Downloaded file is empty or missing")
+                self.on_thread_error(Exception("Downloaded file is empty or missing"), recorder_id="mp4")
 
         except Exception as e:
             logger.error("Error in direct MP4 download: %s", e)
-            super().on_error(f"Error in MP4 download: {e}")
+            self.on_thread_error(e, recorder_id="mp4")

@@ -3,25 +3,9 @@
 
 from __future__ import annotations
 
-import sys
-import os
 import importlib
 from typing import Any
-
-# Add current directory to path for standalone execution
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-try:
-    from debug import get_logger
-except ImportError:
-    try:
-        from .debug import get_logger
-    except ImportError:
-        # Fallback logging if debug module not available
-        import logging
-
-        def get_logger(name):
-            return logging.getLogger(name.replace('.py', ''))
+from debug import get_logger
 
 logger = get_logger(__file__)
 
@@ -30,10 +14,9 @@ class ResolverManager:
     """Resolver loader for streamingserver resolvers"""
 
     def __init__(self):
-        self.resolvers: dict[str, Any] = {}
-        self.active_resolver: str | None = None
+        self.active_resolver: Any | None = None
 
-    def load_resolver(self, provider_id: str) -> Any | None:
+    def get_resolver(self, provider_id: str, args: dict) -> Any | None:
         """Load a resolver by importing its module and creating an instance"""
         try:
             # Import the resolver module
@@ -48,35 +31,10 @@ class ResolverManager:
                 return None
 
             # Create instance
-            instance = resolver_class()
+            self.active_resolver = resolver_class(args)
             logger.info("Resolver %s loaded successfully", provider_id)
-            return instance
+            return self.active_resolver
 
         except Exception as e:
             logger.error("Error loading resolver %s: %s", provider_id, e)
             return None
-
-    def get_resolver(self, provider_id: str) -> Any | None:
-        """Get a resolver instance by provider name. Loads if not already loaded."""
-        # Unload previous resolver if different
-        if provider_id != self.active_resolver:
-            self.unload_resolver(self.active_resolver)
-
-        # Load resolver if not already loaded
-        if provider_id not in self.resolvers:
-            instance = self.load_resolver(provider_id)
-            if instance:
-                self.resolvers[provider_id] = instance
-                self.active_resolver = provider_id
-
-        return self.resolvers.get(provider_id)
-
-    def unload_resolver(self, provider_id: str) -> bool:
-        """Unload a resolver from memory"""
-        if provider_id and provider_id in self.resolvers:
-            del self.resolvers[provider_id]
-            if self.active_resolver == provider_id:
-                self.active_resolver = None
-            logger.info("Resolver %s unloaded", provider_id)
-            return True
-        return False

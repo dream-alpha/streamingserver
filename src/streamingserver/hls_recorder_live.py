@@ -134,7 +134,7 @@ class HLS_Recorder_Live(BaseRecorder):
                     if error_str.startswith("DRM_PROTECTED:"):
                         drm_info = error_str[14:]  # Remove "DRM_PROTECTED:" prefix
                         logger.error("DRM protection detected: %s", drm_info)
-                        super().on_thread_error(Exception(f"DRM Protected Stream: {drm_info}"), error_id="drm_protected")
+                        super().on_thread_error(Exception(f"DRM Protected Stream: {drm_info}"), error_id="drm_protected", recorder_id="hls_live")
                         self.stop_event.set()
                         break
                     # Re-raise non-DRM ValueError
@@ -175,7 +175,7 @@ class HLS_Recorder_Live(BaseRecorder):
                         if segment is None:
                             failed_segment_count += 1
                             if failed_segment_count >= 5:
-                                super().on_thread_error(Exception("Too many failed segments"), error_id="failure")
+                                super().on_thread_error(Exception("Too many failed segments"), error_id="failure", recorder_id="hls_live")
                                 self.stop_event.set()
                                 break  # Exit the for loop, will exit while loop on next iteration
 
@@ -186,7 +186,7 @@ class HLS_Recorder_Live(BaseRecorder):
                         if error_str.startswith("DRM_PROTECTED:"):
                             drm_info = error_str[14:]  # Remove "DRM_PROTECTED:" prefix
                             logger.error("DRM protection detected: %s", drm_info)
-                            super().on_thread_error(Exception(f"DRM Protected Stream: {drm_info}"), error_id="drm_protected")
+                            super().on_thread_error(Exception(f"DRM Protected Stream: {drm_info}"), error_id="drm_protected", recorder_id="hls_live")
                             self.stop_event.set()
                             break
 
@@ -202,10 +202,10 @@ class HLS_Recorder_Live(BaseRecorder):
             if error_str.startswith("DRM_PROTECTED:"):
                 drm_info = error_str[14:]  # Remove "DRM_PROTECTED:" prefix
                 logger.error("DRM protection detected: %s", drm_info)
-                super().on_thread_error(Exception(f"DRM Protected Stream: {drm_info}"), error_id="drm_protected")
+                super().on_thread_error(Exception(f"DRM Protected Stream: {drm_info}"), error_id="drm_protected", recorder_id="hls_live")
             else:
                 logger.error("Recording error: %s", e)
-                super().on_thread_error(e, error_id="failure")  # Explicit error_id for general errors
+                super().on_thread_error(e, error_id="failure", recorder_id="hls_live")
             traceback.print_exc()
             raise
         finally:

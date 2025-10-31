@@ -22,14 +22,14 @@ logger = get_logger(__file__)
 
 
 class HLSSegmentProcessor:
-    def __init__(self, rec_dir, socketserver, playlist_base_url=None, recorder_type=None):
+    def __init__(self, rec_dir, socketserver, playlist_base_url=None, recorder_id=None):
         self.rec_dir = rec_dir
         self.socketserver = socketserver
         self.playlist_base_url = playlist_base_url
-        self.recorder_type = recorder_type or "hls_unknown"
+        self.recorder_id = recorder_id or "hls_unknown"
         logger.info("HLSSegmentProcessor initialized with socketserver: %s", socketserver)
         logger.info("Playlist base URL: %s", playlist_base_url)
-        logger.info("Recorder type: %s", self.recorder_type)
+        logger.info("Recorder type: %s", self.recorder_id)
         # State variables
         self.segment_index = 0
         self.previous_segment_index = -1
@@ -178,12 +178,13 @@ class HLSSegmentProcessor:
                 write_log(self.rec_dir, "bumper-file", self.section_index, self.previous_segment_index, msg="bumper-file")
                 try:
                     bumper_file = "/root/plugins/streamingserver/data/ad2_0.ts"
+                    if not os.path.exists(bumper_file):
+                        bumper_file = "data/ad2_0.ts"
                     with open(bumper_file, "rb") as bf:
                         bumper_data = bf.read()
                 except Exception:
-                    bumper_file = "data/ad2_0.ts"
-                    with open(bumper_file, "rb") as bf:
-                        bumper_data = bf.read()
+                    logger.error("Failed to read bumper file: %s", bumper_file)
+                    bumper_data = b""
 
                 logger.info("Inserting bumper file of size %s bytes", len(bumper_data))
                 os.remove(self.section_file)
@@ -196,7 +197,7 @@ class HLSSegmentProcessor:
                         "rec_file": self.section_file,
                         "section_index": self.section_index,
                         "segment_index": self.previous_segment_index,
-                        "recorder": {"type": self.recorder_type}
+                        "recorder_id": self.recorder_id
                     }])
                     logger.info("Bumper file broadcast complete")
                 else:
@@ -250,7 +251,7 @@ class HLSSegmentProcessor:
                     "rec_file": self.section_file,
                     "section_index": self.section_index,
                     "segment_index": self.segment_index,
-                    "recorder": {"type": self.recorder_type}
+                    "recorder_id": self.recorder_id
                 }])
                 logger.info("Broadcast complete")
             else:

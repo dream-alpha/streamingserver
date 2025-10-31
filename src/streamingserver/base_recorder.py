@@ -69,7 +69,7 @@ class BaseRecorder:
         self.is_running = False  # Ensure flag is cleared
         logger.info(f"{self.name} has fully stopped")
 
-    def on_thread_error(self, error: Exception, error_id: str = "failure"):
+    def on_thread_error(self, error: Exception, error_id: str = "failure", recorder_id: str = "unknown"):
         """Called when the recording thread encounters an error (override in child classes if needed)"""
         self.is_running = False  # Ensure flag is cleared
         logger.error(f"{self.name} encountered an error: {error}")
@@ -77,8 +77,7 @@ class BaseRecorder:
         # Send stop message to client if not already sent
         if self.socketserver and not self.stop_sent:
             logger.info(f"Broadcasting stop message from {self.name} due to error")
-            recorder_type = self.name.lower().replace("_recorder", "")
-            self.socketserver.broadcast(["stop", {"reason": "error", "error_id": error_id, "msg": str(error), "recorder": {"type": recorder_type}}])
+            self.socketserver.broadcast(["stop", {"reason": "error", "error_id": error_id, "msg": str(error), "recorder_id": recorder_id}])
             self.stop_sent = True
 
     def stop(self) -> bool:
@@ -99,7 +98,7 @@ class BaseRecorder:
         logger.info(f"{self.name} fully stopped")
         return True
 
-    def start_playback(self, video_url: str, output_file: str):
+    def start_playback(self, video_url: str, output_file: str, recorder: str):
         """
         Function called by timer to start playback
         This can be used to signal that recording has started and playback can begin
@@ -113,5 +112,5 @@ class BaseRecorder:
                 "rec_file": output_file,
                 "section_index": 0,
                 "segment_index": 0,
-                "recorder": {"type": self.name.lower().replace("_recorder", "")}
+                "recorder_id": recorder
             }])

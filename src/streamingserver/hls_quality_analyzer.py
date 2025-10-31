@@ -161,13 +161,18 @@ def enhance_source_with_hls_quality(source, session=None):
     return enhanced_source
 
 
-def enhance_sources_with_hls_quality(sources, session=None):
+def enhance_sources_with_hls_quality(sources, session=None, expand_adaptive=True):
     """
     Enhance a list of sources by analyzing HLS quality for adaptive streams.
+
+    For adaptive HLS streams, this can either:
+    - Expand into multiple quality-specific sources (expand_adaptive=True, default)
+    - Just annotate with available qualities (expand_adaptive=False)
 
     Args:
         sources (list): List of source dictionaries
         session (requests.Session, optional): Session to use for requests
+        expand_adaptive (bool): Whether to expand adaptive streams into separate sources
 
     Returns:
         list: Enhanced sources with HLS quality information
@@ -178,9 +183,56 @@ def enhance_sources_with_hls_quality(sources, session=None):
     enhanced_sources = []
 
     for source in sources:
-        enhanced_source = enhance_source_with_hls_quality(source, session)
-        enhanced_sources.append(enhanced_source)
+        # Only expand HLS adaptive streams
+        if (expand_adaptive
+                and source.get('format') == 'm3u8'
+                and source.get('quality', '').lower() in {'adaptive', 'unknown'}):
 
+            logger.debug("Analyzing adaptive HLS stream for expansion: %s", source.get('url', ''))
+
+            # Analyze the HLS playlist
+            analysis = analyze_hls_qualities(source.get('url', ''), session)
+
+            if analysis['error'] or not analysis['has_adaptive']:
+                # Failed to analyze or not adaptive - keep original
+                logger.debug("Not expanding source: error=%s, has_adaptive=%s",
+                             analysis.get('error'), analysis.get('has_adaptive'))
+                enhanced_sources.append(source)
+                continue
+
+            # Expand into quality-specific sources
+            if analysis['streams']:
+                logger.info("Expanding adaptive stream into %d quality variants",
+                            len(analysis['streams']))
+
+                for stream in analysis['streams']:
+                    # Create a new source for each quality variant
+                    variant_source = source.copy()
+                    variant_source['quality'] = stream['quality']
+                    variant_source['resolution'] = stream.get('resolution')
+                    variant_source['bandwidth'] = stream.get('bandwidth')
+                    variant_source['original_url'] = source.get('url')  # Keep original master URL
+                    variant_source['variant_uri'] = stream.get('uri')  # Relative URI to variant
+                    variant_source['hls_analysis'] = {
+                        'from_adaptive': True,
+                        'master_url': source.get('url'),
+                        'available_qualities': analysis['qualities']
+                    }
+                    enhanced_sources.append(variant_source)
+
+                    logger.debug("Created variant: %s @ %s kbps",
+                                 stream['quality'], stream['bandwidth'] // 1000)
+            else:
+                # No streams found - keep original
+                logger.warning("No streams found in adaptive playlist, keeping original")
+                enhanced_sources.append(source)
+        else:
+            # Not adaptive or not HLS - just enhance with analysis
+            enhanced_source = enhance_source_with_hls_quality(source, session)
+            enhanced_sources.append(enhanced_source)
+
+    logger.info("Source enhancement complete: %d sources -> %d sources",
+                len(sources), len(enhanced_sources))
     return enhanced_sources
 
 

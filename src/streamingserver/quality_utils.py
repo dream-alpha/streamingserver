@@ -5,8 +5,15 @@
 """
 Simplified Quality Selection Utilities
 
-This module provides a clean, simple approach to quality selection using
-closest-match logic rather than complex scoring algorithms.
+This module provides quality selection using a priority-based scoring system:
+- Quality match (exact > distance-based with penalty for exceeding)
+- Codec preference (AV1 > H.265 > H.264)
+- Format preference (MP4 > M3U8)
+
+Quality levels supported: 2160p, 1440p, 1080p, 720p, 480p, 360p, 240p, 144p
+Special handling:
+- "best" → mapped to "2160p" (selects highest available quality)
+- "adaptive" → expanded into multiple quality variants during HLS analysis
 """
 
 import re
@@ -16,8 +23,7 @@ from hls_quality_analyzer import enhance_sources_with_hls_quality
 logger = get_logger(__file__)
 
 # Quality constants - ordered from highest to lowest quality
-# "adaptive" represents HLS adaptive streaming and should be treated as highest quality
-QUALITY_PRIORITY_ORDER = ["adaptive", "2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
+QUALITY_PRIORITY_ORDER = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
 
 
 def extract_metadata_from_url(url):
@@ -98,20 +104,25 @@ def extract_metadata_from_url(url):
     }
 
 
-def select_best_source(sources, preferred_quality="best", codec_aware=True, av1=None, debug_output=True, analyze_hls=True):
+def select_best_source(sources, preferred_quality="best", codec_aware=True, av1=None, analyze_hls=True):
     """
-    Select the best source using simple closest quality matching.
+    Select the best source using priority-based scoring.
+
+    Scoring priorities (in order):
+    1. Quality match (exact > closest)
+    2. Codec preference (av1 > h265 > h264, filtered by av1 param)
+    3. Format preference (mp4 > m3u8)
 
     Args:
         sources (list): List of source dictionaries
-        preferred_quality (str): Target quality ("best", "1080p", "720p", "adaptive", etc.)
+        preferred_quality (str): Target quality ("best", "1080p", "720p", etc.)
+                                "best" is treated as "2160p" (selects highest available)
         codec_aware (bool): Whether to prefer better codecs when quality matches
         av1 (bool): Whether to include AV1 codecs
-        debug_output (bool): Whether to show detailed source selection info
         analyze_hls (bool): Whether to analyze HLS streams for actual quality levels
 
     Returns:
-        dict: Selected source
+        dict: Selected source or None if all filtered out
     """
     if not sources:
         logger.warning("No sources provided for selection")
@@ -121,21 +132,22 @@ def select_best_source(sources, preferred_quality="best", codec_aware=True, av1=
     if not all(isinstance(source, dict) for source in sources):
         raise ValueError("All sources must be dictionaries with 'quality', 'format', and 'url' keys")
 
+    # Map "best" to highest quality for simpler logic
+    if preferred_quality.lower() == "best":
+        preferred_quality = "2160p"  # Highest quality - algorithm will find closest available
+
     # Enhance sources with HLS quality analysis if requested
     if analyze_hls:
         logger.info("HLS analysis enabled: analyze_hls=%s", analyze_hls)
         try:
-            # Analyze any m3u8 sources (HLS streams), regardless of current quality label
-            # This handles cases where extract_metadata_from_url() may have extracted
-            # an incorrect quality from the URL path
             hls_sources = [s for s in sources if s.get('format') == 'm3u8']
             logger.info("Found %d m3u8 sources for potential HLS analysis", len(hls_sources))
             if hls_sources:
                 logger.info("Analyzing %d HLS sources for quality information...", len(hls_sources))
                 enhanced_sources = enhance_sources_with_hls_quality(sources)
                 if enhanced_sources:
+                    logger.info("HLS enhancement: %d sources -> %d sources", len(sources), len(enhanced_sources))
                     sources = enhanced_sources
-                    logger.info("HLS quality enhancement completed")
                 else:
                     logger.warning("HLS enhancement returned None or empty list")
         except Exception as e:
@@ -143,230 +155,205 @@ def select_best_source(sources, preferred_quality="best", codec_aware=True, av1=
     else:
         logger.info("HLS analysis disabled: analyze_hls=%s", analyze_hls)
 
-    # Debug output: Show all available sources
-    if debug_output:
-        logger.info("=== QUALITY SELECTION DEBUG ===")
-        logger.info("Available sources (%d total):", len(sources))
-        for i, source in enumerate(sources, 1):
-            quality = source.get("quality", "unknown")
-            format_type = source.get("format", "unknown")
-            codec = source.get("codec", "")
-            url = source.get("url", "")
-            codec_info = f" [{codec}]" if codec else ""
+    # Always log input sources summary
+    logger.info("=== QUALITY SELECTION START ===")
+    logger.info("Input: %d sources, target quality: %s, codec_aware: %s, av1: %s",
+                len(sources), preferred_quality, codec_aware, av1)
 
-            # Show HLS enhancement info if available
-            hls_info = ""
-            if source.get('hls_analysis'):
-                hls_data = source['hls_analysis']
-                if hls_data.get('qualities'):
-                    available_qualities = ', '.join(hls_data['qualities'])
-                    hls_info = f" (HLS: {available_qualities})"
-                elif source.get('original_quality') == 'adaptive':
-                    hls_info = " (Enhanced from adaptive)"
+    # Log each input source
+    for i, source in enumerate(sources, 1):
+        quality = source.get("quality", "unknown")
+        format_type = source.get("format", "unknown")
+        codec = source.get("codec", "unknown")
+        url = source.get("url", "")
 
-            logger.info("  %d. %s (%s)%s%s - %s", i, quality, format_type, codec_info, hls_info, url)
+        # Show HLS enhancement info if available
+        hls_info = ""
+        if source.get('hls_analysis'):
+            hls_data = source['hls_analysis']
+            if hls_data.get('from_adaptive'):
+                hls_info = " [from adaptive]"
+            elif hls_data.get('qualities'):
+                available_qualities = ', '.join(hls_data['qualities'])
+                hls_info = f" [HLS: {available_qualities}]"
 
-        logger.info("Selection criteria: quality='%s', codec_aware=%s, av1=%s",
-                    preferred_quality, codec_aware, av1)
+        logger.info("  Source %d: %s (%s) codec:%s%s - %s",
+                    i, quality, format_type, codec, hls_info, url)
 
-    # If only one source, return it
-    if len(sources) == 1:
-        selected = sources[0]
-        logger.info("Only one source available, selecting: %s (%s)",
-                    selected.get("quality", "unknown"), selected.get("format", "unknown"))
-        if debug_output:
-            logger.info("=== SELECTION RESULT: %s ===", selected.get("quality", "unknown"))
-        return selected
-
-    # If "best", select highest quality available
-    if preferred_quality == "best":
-        best_source = _select_highest_quality_source(sources, codec_aware, av1)
-        logger.info("Selected best quality source: %s (%s)",
-                    best_source.get("quality", "unknown"), best_source.get("format", "unknown"))
-        if debug_output:
-            logger.info("=== SELECTION RESULT: %s ===", best_source.get("quality", "unknown"))
-        return best_source
-
-    # Find exact match first
-    exact_match = _find_exact_quality_match(sources, preferred_quality)
-    if exact_match:
-        # If multiple exact matches, prefer better codec if codec_aware
-        if len(exact_match) == 1:
-            selected = exact_match[0]
-            # Check if this was matched because HLS contains the quality
-            if (
-                    selected.get('hls_analysis')
-                    and preferred_quality.lower() in [q.lower() for q in selected['hls_analysis']['qualities']]
-                    and selected.get('quality', '').lower() != preferred_quality.lower()
-            ):
-                logger.info("Found exact quality match in HLS stream: %s (contains %s)",
-                            selected.get("quality", "unknown"), preferred_quality)
-            else:
-                logger.info("Found exact quality match: %s", selected.get("quality", "unknown"))
-            return selected
-        if codec_aware:
-            selected = _select_best_codec(exact_match, av1)
-            logger.info("Found exact quality match with preferred codec: %s (%s)",
-                        selected.get("quality", "unknown"),
-                        _get_codec(selected))
-            return selected
-        selected = exact_match[0]
-        logger.info("Found exact quality match: %s (%s)",
-                    selected.get("quality", "unknown"), selected.get("format", "unknown"))
-        if debug_output:
-            logger.info("=== SELECTION RESULT: %s ===", selected.get("quality", "unknown"))
-        return selected
-
-    # Find closest quality match
-    closest_source = _find_closest_quality_match(sources, preferred_quality)
-    logger.info("Selected closest quality match: %s (%s) - target: %s",
-                closest_source.get("quality", "unknown"), closest_source.get("format", "unknown"), preferred_quality)
-    if debug_output:
-        logger.info("=== SELECTION RESULT: %s ===", closest_source.get("quality", "unknown"))
-    return closest_source
-
-
-def _select_highest_quality_source(sources, codec_aware, av1):
-    """Select the highest quality source from available sources."""
-    # Filter out 2160p (4K) content if AV1 is disabled, as 4K typically requires AV1
+    # Filter out AV1 sources if av1=False and codec_aware=True
     filtered_sources = sources
     if av1 is False and codec_aware:
-        filtered_sources = []
-        for source in sources:
-            quality = source.get("quality", "unknown")
-            if quality == "2160p":
-                logger.debug("Filtering out 2160p source due to av1=False: %s", source.get("url", ""))
-                continue
-            filtered_sources.append(source)
+        non_av1_sources = [s for s in sources if _get_codec(s).lower() != "av1"]
+        if non_av1_sources:
+            filtered_out = len(sources) - len(non_av1_sources)
+            filtered_sources = non_av1_sources
+            logger.info("Filtered out %d AV1 sources (av1=False)", filtered_out)
+        else:
+            logger.warning("All sources are AV1 but av1=False, returning None")
+            logger.info("=== SELECTION RESULT: None (all AV1, disabled) ===")
+            return None
 
-        # If all sources were filtered out, keep the original sources
-        if not filtered_sources:
-            logger.warning("All sources filtered out due to av1=False, keeping original sources")
-            filtered_sources = sources
+    # Filter out 2160p when av1=False (4K typically requires AV1)
+    if av1 is False and codec_aware:
+        non_4k_sources = [s for s in filtered_sources if s.get("quality") != "2160p"]
+        if non_4k_sources and len(non_4k_sources) < len(filtered_sources):
+            logger.info("Filtered out %d 2160p sources (av1=False)", len(filtered_sources) - len(non_4k_sources))
+            filtered_sources = non_4k_sources
 
-    # Sort sources by quality priority (highest first)
-    def quality_priority(source):
-        quality = source.get("quality", "unknown")
-        try:
-            return QUALITY_PRIORITY_ORDER.index(quality)
-        except ValueError:
-            return len(QUALITY_PRIORITY_ORDER)  # Unknown qualities go to end
+    # Score each source and select the best
+    scored_sources = []
+    for source in filtered_sources:
+        score = _score_source(source, preferred_quality, codec_aware)
+        scored_sources.append((score, source))
 
-    sorted_sources = sorted(filtered_sources, key=quality_priority)
+    # Sort by score (higher is better)
+    scored_sources.sort(key=lambda x: x[0], reverse=True)
 
-    if not codec_aware:
-        return sorted_sources[0]
+    best_score, best_source = scored_sources[0]
 
-    # Get all sources with the highest quality
-    highest_quality = sorted_sources[0].get("quality")
-    highest_quality_sources = [s for s in sorted_sources if s.get("quality") == highest_quality]
+    # Always log scoring results (top 5)
+    logger.info("=== SCORING RESULTS (Top 5) ===")
+    for i, (score, source) in enumerate(scored_sources[:5], 1):
+        logger.info("  %d. Score: %.2f - %s (%s) codec:%s - %s",
+                    i, score,
+                    source.get("quality", "unknown"),
+                    source.get("format", "unknown"),
+                    _get_codec(source),
+                    source.get("url", ""))
 
-    if len(highest_quality_sources) == 1:
-        return highest_quality_sources[0]
+    # Always log final selection
+    logger.info("=== SELECTED SOURCE ===")
+    logger.info("Quality: %s, Format: %s, Codec: %s, Score: %.2f",
+                best_source.get("quality", "unknown"),
+                best_source.get("format", "unknown"),
+                _get_codec(best_source),
+                best_score)
+    logger.info("URL: %s", best_source.get("url", ""))
 
-    # Multiple sources with same highest quality - prefer better codec
-    return _select_best_codec(highest_quality_sources, av1)
-
-
-def _find_exact_quality_match(sources, target_quality):
-    """Find sources with exact quality match, including HLS streams with that quality."""
-    direct_matches = []  # Sources where quality directly matches
-    hls_matches = []     # HLS sources that contain the quality
-
-    for source in sources:
-        source_quality = source.get("quality", "").lower()
-
-        # Direct quality match - highest priority
-        if source_quality == target_quality.lower():
-            direct_matches.append(source)
-            continue
-
-        # Check if HLS stream contains the target quality - lower priority
-        hls_analysis = source.get('hls_analysis')
-        if hls_analysis and hls_analysis.get('qualities'):
-            available_qualities = [q.lower() for q in hls_analysis['qualities']]
-            if target_quality.lower() in available_qualities:
-                hls_matches.append(source)
-                continue
-
-    # Prefer direct matches over HLS matches
-    # Direct matches are better because they're typically direct MP4 files
-    # HLS matches require playlist parsing and may have overhead
-    if direct_matches:
-        return direct_matches
-    return hls_matches
+    return best_source
 
 
-def _find_closest_quality_match(sources, target_quality):
-    """Find the source with quality closest to target, considering HLS stream contents."""
-    # Try to parse numeric value from target quality
+def _score_source(source, target_quality, codec_aware):
+    """
+    Score a source based on quality match, codec, and format.
+    Higher score = better match.
+
+    Scoring breakdown:
+    - Quality match: 0-1000 points (exact match, distance-based)
+    - Codec: 0-100 points (av1=100, h265=75, h264=50, unknown=25)
+    - Format: 0-10 points (mp4=10, m3u8=5)
+    """
+    score = 0.0
+
+    # 1. Quality match score (0-1000 points)
+    quality_score = _score_quality_match(source, target_quality)
+    score += quality_score
+
+    # 2. Codec score (0-100 points, only if codec_aware)
+    if codec_aware:
+        codec_score = _score_codec(source)
+        score += codec_score
+
+    # 3. Format score (0-10 points)
+    format_score = _score_format(source)
+    score += format_score
+
+    return score
+
+
+def _score_quality_match(source, target_quality):
+    """
+    Score quality match. Higher is better.
+
+    Scoring:
+    - Exact match: 1000 points
+    - Numeric match: inverse distance score with penalty for exceeding
+    - HLS containing target: 900 points
+    - Non-numeric priority order match: distance-based
+    - Unknown: 0 points
+    """
+    source_quality = source.get("quality", "unknown").lower()
+    target_quality_lower = target_quality.lower()
+
+    # Exact match - highest priority
+    if source_quality == target_quality_lower:
+        return 1000.0
+
+    # Check if HLS stream contains target quality
+    hls_analysis = source.get('hls_analysis')
+    if hls_analysis and hls_analysis.get('qualities'):
+        available_qualities = [q.lower() for q in hls_analysis['qualities']]
+        if target_quality_lower in available_qualities:
+            return 900.0  # Slightly less than exact match
+
+    # Numeric quality matching - distance-based
     target_numeric = _extract_numeric_quality(target_quality)
+    source_numeric = _extract_numeric_quality(source_quality)
 
-    # If target is numeric, only consider numeric sources for closest match
-    if target_numeric is not None:
-        numeric_sources = []
-        for source in sources:
-            quality = source.get("quality", "unknown")
-            source_numeric = _extract_numeric_quality(quality)
+    if target_numeric is not None and source_numeric is not None:
+        distance = abs(source_numeric - target_numeric)
 
-            # Check if this source has the exact target quality (especially in HLS streams)
-            hls_analysis = source.get('hls_analysis')
-            if hls_analysis and hls_analysis.get('qualities'):
-                # Check if any HLS quality exactly matches target
-                for hls_quality in hls_analysis['qualities']:
-                    hls_numeric = _extract_numeric_quality(hls_quality)
-                    if hls_numeric == target_numeric:
-                        # Exact match in HLS stream - give it priority (distance = 0)
-                        numeric_sources.append((source, 0))
-                        break
-                else:
-                    # No exact match, use the stream's maximum quality for distance calculation
-                    if source_numeric is not None:
-                        distance = abs(source_numeric - target_numeric)
-                        # Prefer lower quality over much higher quality (bandwidth consideration)
-                        # If source is significantly higher than target, penalize it more
-                        if source_numeric > target_numeric:
-                            distance *= 1.5  # 50% penalty for exceeding target
-                        numeric_sources.append((source, distance))
-            elif source_numeric is not None:
-                distance = abs(source_numeric - target_numeric)
-                # Prefer lower quality over much higher quality (bandwidth consideration)
-                # If source is significantly higher than target, penalize it more
-                if source_numeric > target_numeric:
-                    distance *= 1.5  # 50% penalty for exceeding target
-                numeric_sources.append((source, distance))
+        # Apply 2x penalty for exceeding target (bandwidth consideration)
+        if source_numeric > target_numeric:
+            distance *= 2.0
 
-        # If we found numeric sources, return the closest one
-        if numeric_sources:
-            numeric_sources.sort(key=lambda x: x[1])  # Sort by distance
-            return numeric_sources[0][0]  # Return source with smallest distance
+        # Convert distance to score (max 800 points, decreases with distance)
+        # Using exponential decay: score = 800 * e^(-distance/200)
+        quality_score = 800.0 * (2.71828 ** (-distance / 200.0))
+        return quality_score
 
-    # For non-numeric targets, use priority order comparison
-    best_source = None
-    best_distance = float('inf')
+    # Non-numeric quality - try priority order
+    try:
+        target_index = QUALITY_PRIORITY_ORDER.index(target_quality_lower)
+        source_index = QUALITY_PRIORITY_ORDER.index(source_quality)
+        distance = abs(source_index - target_index)
+        # Closer in priority list = better score
+        return max(0, 700.0 - (distance * 100))
+    except ValueError:
+        return 0.0  # Unknown quality
 
-    for source in sources:
-        quality = source.get("quality", "unknown")
 
-        # Check HLS streams for exact match first
-        hls_analysis = source.get('hls_analysis')
-        if hls_analysis and hls_analysis.get('qualities'):
-            if target_quality in hls_analysis['qualities']:
-                return source  # Exact match in HLS stream
+def _score_codec(source):
+    """
+    Score codec preference. Higher is better.
 
-        try:
-            target_index = QUALITY_PRIORITY_ORDER.index(target_quality)
-            source_index = QUALITY_PRIORITY_ORDER.index(quality)
-            distance = abs(source_index - target_index)
-            if distance < best_distance:
-                best_distance = distance
-                best_source = source
-        except ValueError:
-            # Unknown quality - skip it (no fallback behavior)
-            continue
+    Scoring:
+    - av1: 100 points
+    - h265/hevc: 75 points
+    - h264/avc: 50 points
+    - unknown: 25 points
+    """
+    codec = _get_codec(source).lower()
 
-    # If no match found in priority order, return first source
-    return best_source or sources[0]
+    codec_scores = {
+        "av1": 100.0,
+        "h265": 75.0,
+        "hevc": 75.0,
+        "h264": 50.0,
+        "avc": 50.0,
+        "unknown": 25.0,
+    }
+
+    return codec_scores.get(codec, 25.0)
+
+
+def _score_format(source):
+    """
+    Score format preference. Higher is better.
+
+    Scoring:
+    - mp4: 10 points (direct file)
+    - m3u8: 5 points (streaming)
+    - unknown: 0 points
+    """
+    format_type = source.get("format", "unknown").lower()
+
+    format_scores = {
+        "mp4": 10.0,
+        "m3u8": 5.0,
+    }
+
+    return format_scores.get(format_type, 0.0)
 
 
 def _extract_numeric_quality(quality_str):
@@ -380,38 +367,6 @@ def _extract_numeric_quality(quality_str):
         return int(match.group(1))
 
     return None
-
-
-def _select_best_codec(sources_with_same_quality, av1):
-    """Select source with best codec from sources with same quality."""
-    # Filter AV1 if disabled
-    filtered_sources = sources_with_same_quality
-    if av1 is False:
-        non_av1_sources = []
-        for source in sources_with_same_quality:
-            codec = _get_codec(source)
-            if codec.lower() != "av1":
-                non_av1_sources.append(source)
-        if non_av1_sources:
-            filtered_sources = non_av1_sources
-
-    # Simple codec preference: av1 > h265 > h264 > others
-    # Also prefer direct formats (MP4) over HLS when codec is unknown or equal
-    codec_priority = {"av1": 0, "h265": 1, "hevc": 1, "h264": 2, "avc": 2}
-
-    def codec_score(source):
-        codec = _get_codec(source).lower()
-        codec_value = codec_priority.get(codec, 99)  # Unknown codecs get low priority
-
-        # Add format preference as tiebreaker: prefer mp4 over m3u8
-        # This ensures that when codecs are equal or unknown, we prefer direct MP4 files
-        format_penalty = 0.0
-        if source.get('format') == 'm3u8':
-            format_penalty = 0.1  # Small penalty for HLS
-
-        return codec_value + format_penalty
-
-    return min(filtered_sources, key=codec_score)
 
 
 def _get_codec(source):

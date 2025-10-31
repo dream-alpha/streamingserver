@@ -24,9 +24,16 @@ logger = get_logger(__file__)
 class BaseResolver:
     """Base class for site resolvers"""
 
-    def __init__(self):
+    def __init__(self, args: dict):
+        self.provider_id = args.get("provider_id", "")
+        self.data_dir = args.get("data_dir")
+        self.url = args.get("url", "")
+        self.quality = args.get("quality", "best")
+        self.av1 = args.get("av1", False)
+        self.show_ads = args.get("show_ads", True)  # PlutoTV specific
         self.session = get_session()
         self.session.headers.update(get_headers("standard"))
+        self.resolve_result = args.copy()
 
     def _is_template_url(self, url: str) -> bool:
         """
@@ -92,16 +99,38 @@ class BaseResolver:
             str: URL with _TPL_ replaced with appropriate quality
         """
         try:
-            # Extract available qualities from the template playlist
-            available_qualities = self._extract_qualities_from_template_playlist(url)
+            # Try fetching a sample playlist to extract available qualities
+            available_qualities = []
 
-            if not available_qualities:
-                # Try to parse qualities from URL parameters as fallback
+            # Subclasses (like xHamster) may override this to parse URL params first
+            if hasattr(self, '_parse_qualities_from_url_params'):
+                logger.debug("Found _parse_qualities_from_url_params method, calling it")
                 available_qualities = self._parse_qualities_from_url_params(url)
+                logger.debug("_parse_qualities_from_url_params returned: %s", available_qualities)
+            else:
+                logger.debug("No _parse_qualities_from_url_params method found in resolver")
+
+            # If URL params don't contain quality info, try fetching a sample playlist
+            if not available_qualities:
+                # Replace _TPL_ with a common quality to fetch the master playlist
+                sample_url = url.replace("_TPL_", "720p")
+                available_qualities = self._extract_qualities_from_template_playlist(sample_url)
 
             if not available_qualities:
-                logger.warning("No qualities found, using basic fallback")
-                available_qualities = ["1080p", "720p", "480p"]  # Basic fallback qualities
+                # Can't determine available qualities - just replace with requested quality
+                # If it doesn't exist, the recorder will fail naturally with proper error handling
+                logger.warning("Could not determine available qualities from template URL")
+                logger.info("Replacing _TPL_ with requested quality: %s", quality)
+
+                # Normalize quality format (add 'p' suffix if missing)
+                if quality and quality not in {"best", "adaptive"} and not quality.endswith('p'):
+                    target_quality = f"{quality}p"
+                elif quality in {"best", "adaptive"}:
+                    target_quality = "720p"
+                else:
+                    target_quality = quality
+
+                return url.replace("_TPL_", target_quality)
 
             # Create source objects for each available quality - same as provider resolvers
             sources = []
@@ -114,15 +143,14 @@ class BaseResolver:
                 })
 
             # Use the same selection logic as providers
-            if sources:
-                best_source = select_best_source(sources, quality, codec_aware=False)
-                if best_source:
-                    logger.info("Selected quality for _TPL_ resolution: %s", best_source.get("quality"))
-                    return best_source.get("url")
+            best_source = select_best_source(sources, quality, codec_aware=False)
+            if best_source:
+                logger.info("Selected quality for _TPL_ resolution: %s", best_source.get("quality"))
+                return best_source.get("url")
 
-            # Fallback: just replace with first available quality
-            resolved_url = url.replace("_TPL_", available_qualities[0] if available_qualities else "720p")
-            return resolved_url
+            # Shouldn't reach here, but fallback to first available quality
+            logger.warning("select_best_source returned None, using first available quality")
+            return url.replace("_TPL_", available_qualities[0])
 
         except Exception as e:
             logger.error("Failed to resolve _TPL_ template: %s", e)
@@ -155,7 +183,7 @@ class BaseResolver:
                 logger.debug("Replaced template variable %s with %s", pattern, replacement)
 
         if resolved_url != url:
-            logger.info("Resolved DASH template: %s -> %s", url[:80], resolved_url[:80])
+            logger.info("Resolved DASH template: %s -> %s", url, resolved_url)
 
         return resolved_url
 
@@ -203,37 +231,7 @@ class BaseResolver:
 
         return []
 
-    def _parse_qualities_from_url_params(self, url: str) -> list[str]:
-        """
-        Parse available qualities from URL parameters (xHamster style).
-
-        Args:
-            url (str): URL to parse
-
-        Returns:
-            list[str]: List of available qualities
-        """
-        # Parse available qualities from the URL
-        # Example: multi=256x144:144p:,426x240:240p:,854x480:480p:
-
-        multi_pattern = r'multi=([^/&]+)'
-        multi_match = re.search(multi_pattern, url)
-
-        if multi_match:
-            multi_string = multi_match.group(1)
-            # Extract quality info: resolution:quality:
-            quality_pattern = r'(\d+x\d+):(\d+p):'
-            quality_matches = re.findall(quality_pattern, multi_string)
-
-            qualities = [quality for _resolution, quality in quality_matches]
-
-            if qualities:
-                logger.info("Parsed qualities from URL parameters: %s", qualities)
-                return qualities
-
-        return []
-
-    def determine_recorder_type(self, url: str) -> str:
+    def determine_recorder_id(self, url: str) -> str:
         """
         Determine the appropriate recorder type based on URL characteristics.
 
@@ -251,12 +249,8 @@ class BaseResolver:
         # Check for HLS formats
         if '.m3u8' in url_lower:
             # Check for MP4/M4S segment-based HLS streams
-            if ('.m4s.m3u8' in url_lower or 'm4s' in url_lower
-                    or '.av1.mp4.m3u8' in url_lower or '.mp4.m3u8' in url_lower):
+            if 'm4s' in url_lower or '.mp4.' in url_lower:
                 return 'hls_m4s'
-            # Check for live streaming indicators
-            if 'live' in url_lower or 'stream' in url_lower:
-                return 'hls_live'
             # Default HLS type
             return 'hls_basic'
 
