@@ -378,7 +378,7 @@ def comprehensive_drm_check(url: str = "", content: str = "",
     primary_drm_type = all_drm_types[0] if all_drm_types else None
 
     logger.debug("DRM check - URL: %s, Content length: %d, Has DRM: %s, Type: %s",
-                 url[:50] + "..." if len(url) > 50 else url,
+                 url,
                  len(content) if content else 0,
                  has_drm, primary_drm_type)
 

@@ -12,9 +12,9 @@ def open_ffmpeg_process(section_file):
     ffmpeg_cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-fflags", "+discardcorrupt+genpts+igndts+ignidx+nofillin",
-        "-err_detect", "ignore_err",
         "-f", "mpegts", "-i", "-",
-        "-map", "0:v:0", "-map", "0:a:0",
+        "-map", "0:v?", "-map", "0:a?",  # Optional mapping - don't fail if streams missing
+        "-flush_packets", "1",   # Flush packets immediately
         "-c", "copy", section_file
     ]
     ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)  # pylint: disable=consider-using-with

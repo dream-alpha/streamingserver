@@ -25,28 +25,28 @@ class Recorder:
 
     def __init__(self):
         self.current_recorder: BaseRecorder | None = None
-        self.recorder_types = {
+        self.recorder_ids = {
             'mp4': MP4_Recorder,
             'hls_basic': HLS_Recorder_Basic,
             'hls_live': HLS_Recorder_Live,
             'hls_m4s': HLS_Recorder_M4S
         }
 
-    def start_recorder(self, recorder_type: str, resolve_result: dict) -> bool:
+    def start_recorder(self, recorder_id: str, resolve_result: dict) -> bool:
         """Start recorder by type name - stops current recorder and waits"""
-        if recorder_type not in self.recorder_types:
-            logger.error(f"Unknown recorder type: {recorder_type}")
+        if recorder_id not in self.recorder_ids:
+            logger.error(f"Unknown recorder type: {recorder_id}")
             return False
 
         # Stop current recorder and wait for it to fully stop
         if self.current_recorder and self.current_recorder.is_running:
-            logger.info(f"Stopping current {self.current_recorder.name} before starting {recorder_type}...")
+            logger.info(f"Stopping current {self.current_recorder.name} before starting {recorder_id}...")
             if not self.stop():
                 logger.error("Failed to stop current recorder")
                 return False
             logger.info("Current recorder fully stopped, starting new one...")
 
-        recorder_class = self.recorder_types[recorder_type]
+        recorder_class = self.recorder_ids[recorder_id]
         self.current_recorder = recorder_class()
         return self.current_recorder.start_thread(resolve_result)
 
@@ -68,7 +68,7 @@ class Recorder:
 
     def get_available_types(self) -> list:
         """Get list of available recorder types"""
-        return list(self.recorder_types.keys())
+        return list(self.recorder_ids.keys())
 
     def record_stream(self, resolve_result):
         """
@@ -84,14 +84,11 @@ class Recorder:
         channel_uri = resolve_result.get("resolved_url")
         auth_tokens = resolve_result.get("auth_tokens")
         original_page_url = resolve_result.get("original_url")
-        resolver_name = resolve_result.get("resolver")
         recorder_id = resolve_result.get("recorder_id")
         rec_dir = resolve_result.get("rec_dir", "/tmp")
         # show_ads and buffering passed via resolve_result to sub-recorders
 
         logger.info("Recording stream - URI: %s, Directory: %s", channel_uri, rec_dir)
-        if resolver_name:
-            logger.info("Using %s resolver", resolver_name)
         if auth_tokens:
             logger.info("Authentication tokens provided for protected stream")
         if original_page_url:

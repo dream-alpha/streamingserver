@@ -9,7 +9,6 @@ import tempfile
 from io import BytesIO
 import threading
 import datetime
-from session_utils import get_session
 from base_provider import BaseProvider
 from debug import get_logger
 
@@ -20,16 +19,11 @@ TIMEOUT = (5, 20)  # connect, read
 
 
 class Provider(BaseProvider):
-    def __init__(self, provider_id, data_dir):
-        super().__init__()
-        self.provider_id = provider_id
-        self.data_dir = data_dir
+    def __init__(self, args: dict):
+        super().__init__(args)
         self.cache_file = self.data_dir / "cache.json"
         self._update_thread = None
         self._stop_event = threading.Event()
-
-        # Create session for HTTP requests
-        self.session = get_session()
 
     def get_categories(self):
         """

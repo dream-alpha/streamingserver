@@ -19,12 +19,21 @@ def send_message(sock, message):
     sock.sendall(length_prefix + json_data)
 
 
-class RequestHandler():
+class SocketManager():
     def __init__(self):
         self.provider_manager = ProviderManager()
         self.resolver_manager = ResolverManager()
         self.server = None  # Will be set when handler is attached to server
         self.request = None
+
+    def create_data_dir(self, base_data_dir, provider_id):
+        """Create and return provider-specific data directory"""
+        if not base_data_dir:
+            base_data_dir = "/tmp/data"
+        data_dir = Path(base_data_dir) / provider_id
+        data_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Data directory created/verified: %s", data_dir)
+        return data_dir
 
     def handle_message(self, message):
         logger.info("message received: %s", message)
@@ -33,12 +42,9 @@ class RequestHandler():
         logger.info("cmd: %s, args: %s", cmd, args)
         provider_id = args.get("provider", {}).get("provider_id", None)
         data_dir = args.get("data_dir", None)
-        if not data_dir:
-            data_dir = "/tmp/data"
+
         if provider_id:
-            data_dir = Path(data_dir) / provider_id
-            data_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("data_dir: %s", data_dir)
+            data_dir = self.create_data_dir(data_dir, provider_id)
 
         match cmd:
             case "start":
@@ -47,53 +53,48 @@ class RequestHandler():
                     self.server.recorder = Recorder()
                     self.server.recorder.server = self.server
 
-                # Get provider config to access provider-specific quality setting
-                provider_config = None
-                if provider_id:
-                    providers_list = self.provider_manager.get_providers()
-                    provider_config = next((p for p in providers_list if p.get("provider_id") == provider_id), None)
-
                 # Use provider-specific quality only if client explicitly requests "provider"
                 # Otherwise, allow client to override with specific quality (1080p, 720p, etc.)
                 client_quality = args.get("quality", "provider")
-                if provider_config and client_quality == "provider":
-                    args["quality"] = provider_config.get("quality", "best")
-                    logger.info("Using provider quality: %s", args["quality"])
+                provider_quality = args.get("provider", {}).get("quality", "provider")
+
+                if client_quality == "provider":
+                    args["quality"] = provider_quality
+                    logger.info("Using provider quality: %s", provider_quality)
                 elif client_quality != "provider":
                     logger.info("Using client-specified quality: %s (overriding provider default)", client_quality)
 
-                resolver_instance = self.resolver_manager.get_resolver(provider_id)
+                # Check for DRM protection before calling resolver
+                video_data = args.get("video")
+                if video_data and "license_url" in video_data:
+                    license_url = video_data["license_url"]
+                    logger.error("DRM protection detected - license_url: %s", license_url)
+                    # Send stop error message for DRM protection
+                    stop_response = ["stop", {
+                        "reason": "error",
+                        "error_id": "drm_protected",
+                        "msg": f"DRM Protected Stream: Content with Widevine DRM (license: {license_url})",
+                        "recorder_id": "unknown"
+                    }]
+                    self.server.broadcast(stop_response)
+                    return
+
+                resolver_instance = self.resolver_manager.get_resolver(provider_id, args)
 
                 if resolver_instance and hasattr(resolver_instance, 'resolve_url'):
                     logger.info("Resolving URL for recording: %s", args.get("url", ""))
-                    resolve_result = resolver_instance.resolve_url(args)
-
-                    # Check if resolver detected DRM protection
-                    if resolve_result and resolve_result.get("drm_protected"):
-                        logger.error("DRM protection detected in resolver: %s", resolve_result.get("drm_info", "Unknown DRM"))
-                        # Send stop error message for DRM protection
-                        stop_response = ["stop", {
-                            "reason": "error",
-                            "error_id": resolve_result.get("error_id", "drm_protected"),
-                            "msg": resolve_result.get("error_msg", "DRM Protected Stream"),
-                            "recorder": {"type": resolve_result.get("recorder_id", "unknown")}
-                        }]
-                        self.server.broadcast(stop_response)
-                        # Continue to next command instead of closing connection
-                        return
+                    resolve_result = resolver_instance.resolve_url()
 
                     # Add metadata to resolve_result
-                    if resolve_result and resolve_result.get("resolved"):
-                        for key in args:
-                            if key not in resolve_result:
-                                resolve_result[key] = args[key]
+                    if resolve_result and resolve_result.get("resolved_url"):
                         resolve_result["socketserver"] = self.server
                         logger.info("Resolution successful: %s", resolve_result)
-
                         self.server.recorder.record_stream(resolve_result)
                     else:
                         # Resolution failed
                         logger.warning("URL resolution failed, stopping here.")
+                        error_response = ["stop", {"reason": "error", "error_id": "failure", "message": f"Resolver failed to resolve URL for provider {provider_id}"}]
+                        send_message(self.request, error_response)
 
             case "stop":
                 logger.info("Stopping recording - recorder state: %s",
@@ -103,7 +104,7 @@ class RequestHandler():
                         self.server.recorder.stop()
                 except Exception as e:
                     logger.error("Error stopping recording: %s", e)
-                    error_response = ["stop", {"status": "error", "error_id": "failure", "message": f"Failed to stop recording: {e}"}]
+                    error_response = ["stop", {"reason": "error", "error_id": "failure", "message": f"Failed to stop recording: {e}"}]
                     send_message(self.request, error_response)
 
             case "get_providers":
@@ -115,16 +116,21 @@ class RequestHandler():
                     logger.debug("Providers response sent successfully")
                 except Exception as e:
                     logger.error("Error sending providers response: %s", e)
-                    error_response = ["error", {"message": f"Failed to get providers: {e}"}]
+                    error_response = ["stop", {"reason": "error", "error_id": "failure", "message": f"Failed to get providers: {e}"}]
                     send_message(self.request, error_response)
 
             case "get_categories":
                 try:
                     provider_instance = None
                     if provider_id and data_dir:
+                        # Build args dict for provider instantiation
+                        provider_args = {
+                            "provider_id": provider_id,
+                            "data_dir": data_dir
+                        }
                         provider_instance = self.provider_manager.get_provider(
                             provider_id,
-                            data_dir
+                            provider_args
                         )
 
                     if provider_instance:
@@ -135,20 +141,25 @@ class RequestHandler():
                     else:
                         # Provider instance not available
                         logger.warning("Provider instance not available for command: %s", cmd)
-                        error_response = ["error", {"message": f"Provider not available for {cmd}"}]
+                        error_response = ["stop", {"reason": "error", "error_id": "failure", "message": f"Provider not available for {cmd}"}]
                         send_message(self.request, error_response)
                 except Exception as e:
                     logger.error("Error getting categories: %s", e)
-                    error_response = ["error", {"message": f"Failed to get categories: {e}"}]
+                    error_response = ["stop", {"reason": "error", "error_id": "failure", "message": f"Failed to get categories: {e}"}]
                     send_message(self.request, error_response)
 
             case "get_media_items":
                 try:
                     provider_instance = None
                     if provider_id and data_dir:
+                        # Build args dict for provider instantiation
+                        provider_args = {
+                            "provider_id": provider_id,
+                            "data_dir": data_dir
+                        }
                         provider_instance = self.provider_manager.get_provider(
                             provider_id,
-                            data_dir
+                            provider_args
                         )
 
                     if provider_instance:
@@ -168,11 +179,11 @@ class RequestHandler():
                     else:
                         # Provider instance not available
                         logger.warning("Provider instance not available for command: %s", cmd)
-                        error_response = ["error", {"message": f"Provider not available for {cmd}"}]
+                        error_response = ["stop", {"reason": "error", "error_id": "failure", "message": f"Provider not available for {cmd}"}]
                         send_message(self.request, error_response)
                 except Exception as e:
                     logger.error("Error getting media items: %s", e)
-                    error_response = ["error", {"message": f"Failed to get media items: {e}"}]
+                    error_response = ["stop", {"reason": "error", "error_id": "failure", "message": f"Failed to get media items: {e}"}]
                     send_message(self.request, error_response)
             case _:
                 logger.error("Unknown command: %s", cmd)

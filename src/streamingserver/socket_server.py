@@ -4,7 +4,7 @@
 import json
 import struct
 import socketserver
-from socket_request_handler import RequestHandler, send_message
+from socket_manager import SocketManager, send_message
 from debug import get_logger
 
 logger = get_logger(__file__)
@@ -15,9 +15,9 @@ class CommandHandler(socketserver.BaseRequestHandler):
     def setup(self):
         """Called after __init__ to set up the handler"""
         # Initialize the request handler logic
-        self._request_handler = RequestHandler()
-        self._request_handler.server = self.server
-        self._request_handler.request = self.request
+        self._socket_manager = SocketManager()
+        self._socket_manager.server = self.server
+        self._socket_manager.request = self.request
 
     def handle(self):
         logger.debug("Connection established with %s", self.client_address)
@@ -84,7 +84,7 @@ class CommandHandler(socketserver.BaseRequestHandler):
 
                     logger.debug("socket server received: %s", req)
 
-                    self._request_handler.handle_message(req)
+                    self._socket_manager.handle_message(req)
 
                 except Exception as e:
                     logger.error("Error handling command: %s", e)
